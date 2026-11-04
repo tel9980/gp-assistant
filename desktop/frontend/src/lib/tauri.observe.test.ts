@@ -1,3 +1,5 @@
+const INDUSTRY_URL_RE = /\/mobile-industry-snapshot(\.[0-9a-f]{6,})?\.json$/;
+const SNAPSHOT_URL_RE = /\/mobile-financial-snapshot(\.[0-9a-f]{6,})?\.json$/;
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 describe("desktop financial snapshot and backtest routes", () => {
@@ -16,12 +18,12 @@ describe("desktop financial snapshot and backtest routes", () => {
     let industryAttempts = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/mobile-industry-snapshot.json")) {
+      if (INDUSTRY_URL_RE.test(url)) {
         industryAttempts += 1;
         if (industryAttempts === 1) return new Response("unavailable", { status: 503 });
         return new Response(JSON.stringify({ industries: { "002432.SZ": "医疗器械" } }));
       }
-      if (url.endsWith("/mobile-financial-snapshot.json")) {
+      if (SNAPSHOT_URL_RE.test(url)) {
         return new Response(JSON.stringify({ financials: {} }));
       }
       return new Response(JSON.stringify({ data: null }));
@@ -63,10 +65,10 @@ describe("desktop financial snapshot and backtest routes", () => {
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null) });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/mobile-industry-snapshot.json")) {
+      if (INDUSTRY_URL_RE.test(url)) {
         return new Response(JSON.stringify({ industries: { "002432.SZ": "医疗器械" } }));
       }
-      if (url.endsWith("/mobile-financial-snapshot.json")) {
+      if (SNAPSHOT_URL_RE.test(url)) {
         return new Response(JSON.stringify({ financials: {} }));
       }
       return new Response(JSON.stringify({ data: null }));
@@ -110,7 +112,7 @@ describe("desktop financial snapshot and backtest routes", () => {
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null) });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/mobile-financial-snapshot.json")) {
+      if (SNAPSHOT_URL_RE.test(url)) {
         return new Response(JSON.stringify({
           financials: {
             "000100.SZ": {
@@ -176,12 +178,12 @@ describe("desktop financial snapshot and backtest routes", () => {
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null) });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/mobile-industry-snapshot.json")) {
+      if (INDUSTRY_URL_RE.test(url)) {
         return new Response(JSON.stringify({
           industries: { "002432.SZ": "医疗器械" },
         }));
       }
-      if (url.endsWith("/mobile-financial-snapshot.json")) {
+      if (SNAPSHOT_URL_RE.test(url)) {
         return new Response(JSON.stringify({
           financials: {
             "002432.SZ": {

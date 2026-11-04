@@ -87,8 +87,21 @@ const OBSERVE_FULL_HISTORY_LIMIT = 10000;
 const OBSERVE_HISTORY_LIMIT = OBSERVE_FULL_HISTORY_LIMIT;
 const FRONTEND_BASE_URL =
   typeof window === "undefined" || !window.location?.href ? "http://localhost/" : window.location.href;
-const BUNDLED_FINANCIAL_SNAPSHOT_URL = new URL("mobile-financial-snapshot.json", FRONTEND_BASE_URL).toString();
-const BUNDLED_INDUSTRY_SNAPSHOT_URL = new URL("mobile-industry-snapshot.json", FRONTEND_BASE_URL).toString();
+// 构建时注入的内容哈希（vite.config.ts 的 define）：文件名带哈希才能安全长缓存。
+declare const __SNAPSHOT_FINANCIAL__: string | undefined;
+declare const __SNAPSHOT_INDUSTRY__: string | undefined;
+function snapshotFileName(stem: string, version: string | undefined): string {
+  return version ? `${stem}.${version}.json` : `${stem}.json`;
+}
+const SNAPSHOT_CACHE: RequestCache = "force-cache";
+const BUNDLED_FINANCIAL_SNAPSHOT_URL = new URL(
+  snapshotFileName("mobile-financial-snapshot", typeof __SNAPSHOT_FINANCIAL__ === "string" ? __SNAPSHOT_FINANCIAL__ : ""),
+  FRONTEND_BASE_URL,
+).toString();
+const BUNDLED_INDUSTRY_SNAPSHOT_URL = new URL(
+  snapshotFileName("mobile-industry-snapshot", typeof __SNAPSHOT_INDUSTRY__ === "string" ? __SNAPSHOT_INDUSTRY__ : ""),
+  FRONTEND_BASE_URL,
+).toString();
 const DEDUCTED_FINANCIAL_FIELDS = [
   "deducted_net_profit_billion",
   "deducted_net_profit_margin",
@@ -913,7 +926,7 @@ async function loadBundledFinancialSnapshot(): Promise<Record<string, unknown> |
   if (financialSnapshotPromise) return financialSnapshotPromise;
   financialSnapshotPromise = (async () => {
     try {
-      const response = await fetch(BUNDLED_FINANCIAL_SNAPSHOT_URL, { cache: "no-store" });
+      const response = await fetch(BUNDLED_FINANCIAL_SNAPSHOT_URL, { cache: SNAPSHOT_CACHE });
       if (!response.ok) return null;
       const snapshot = asRecord(await response.json());
       const units = financialSnapshotUnits(snapshot, true);
@@ -956,7 +969,7 @@ async function loadBundledIndustrySnapshot(): Promise<Record<string, unknown> | 
   if (industrySnapshotPromise) return industrySnapshotPromise;
   const loadPromise = (async () => {
     try {
-      const response = await fetch(BUNDLED_INDUSTRY_SNAPSHOT_URL, { cache: "no-store" });
+      const response = await fetch(BUNDLED_INDUSTRY_SNAPSHOT_URL, { cache: SNAPSHOT_CACHE });
       if (!response.ok) return null;
       const snapshot = asRecord(await response.json());
       const industries: Record<string, string> = {};

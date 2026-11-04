@@ -1,0 +1,91 @@
+name: Frontend and core checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (typecheck / unit / bundle budget)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - name: Install
+        working-directory: desktop/frontend
+        run: npm ci
+
+      - name: Typecheck + build
+        working-directory: desktop/frontend
+        run: npm run build:app
+
+      - name: Unit tests
+        working-directory: desktop/frontend
+        run: npx vitest run --config vitest.config.ts
+
+      - name: Bundle budget
+        working-directory: desktop/frontend
+        run: npm run test:bundle
+
+      - name: Contract scripts (CSS / 触摸目标 / 主题 / 密度 / 版本)
+        working-directory: desktop/frontend
+        run: |
+          node ../../scripts/check-version-consistency.mjs
+          node ../../scripts/check-color-contract.mjs
+          node ../../scripts/check-ui-touch-targets.mjs
+          node ../../scripts/check-css-architecture.mjs
+          node ../../scripts/check-unstyled-classes.mjs
+          node ../../scripts/check-ui-density.mjs
+          node ../../scripts/check-theme-parity.mjs
+
+  core:
+    name: gp-core (fmt / clippy / tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/gp-core
+
+      # gp-core 的 Tauri 依赖在 Linux 上需要这些系统库
+      - name: System libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev patchelf
+
+      - name: cargo test --lib
+        working-directory: native/gp-core
+        run: cargo test --lib
+
+      - name: cargo fmt --check
+        working-directory: native/gp-core
+        run: cargo fmt --check
+
+      # 当前基线还有 27 条 clippy 警告（其中 13 条可 --fix 自动修）。
+      # 先跑成「可见但不阻断」，清零后再加 `-- -D warnings`。
+      - name: cargo clippy（基线 27 条警告，暂不阻断）
+        working-directory: native/gp-core
+        run: cargo clippy --all-targets --message-format short
