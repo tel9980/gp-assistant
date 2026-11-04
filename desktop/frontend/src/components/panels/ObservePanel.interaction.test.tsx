@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getJsonMock } = vi.hoisted(() => ({ getJsonMock: vi.fn() }));
 
-vi.mock("../../lib/tauri", () => ({ getJson: getJsonMock }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../lib/tauri")>()), ...{ getJson: getJsonMock } }));
 
 import { ObservePanel } from "./ObservePanel";
 import { currentSystemDateInputValue } from "../../lib/format";

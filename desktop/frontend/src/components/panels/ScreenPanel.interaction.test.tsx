@@ -8,7 +8,7 @@ const { postJsonMock, getTauriListenMock } = vi.hoisted(() => ({
   getTauriListenMock: vi.fn(),
 }));
 
-vi.mock("../../lib/tauri", () => ({
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../lib/tauri")>()),
   postJson: postJsonMock,
   getTauriListen: getTauriListenMock,
 }));

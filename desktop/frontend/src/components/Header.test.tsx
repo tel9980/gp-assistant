@@ -2,7 +2,7 @@ import { createRef } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../lib/tauri", () => ({ getJson: vi.fn() }));
+vi.mock("../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/tauri")>()), ...{ getJson: vi.fn() } }));
 
 import { Header } from "./Header";
 

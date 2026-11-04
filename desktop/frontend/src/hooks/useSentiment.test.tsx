@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSentiment } from "./useSentiment";
 import type { SentimentAnalysis } from "../types/sentiment";
 const { postJson } = vi.hoisted(() => ({ postJson: vi.fn() }));
-vi.mock("../lib/tauri", () => ({ postJson }));
+vi.mock("../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/tauri")>()), ...{ postJson } }));
 let state!: ReturnType<typeof useSentiment>;
 let renderer: ReactTestRenderer | undefined;
 const old = { analysis_id: "old", stock_code: "000001.SZ", snapshot: { snapshot_id: "frozen" } } as SentimentAnalysis;

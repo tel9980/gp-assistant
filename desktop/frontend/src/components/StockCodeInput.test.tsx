@@ -4,7 +4,7 @@ import { useState } from "react";
 
 const { getJsonMock } = vi.hoisted(() => ({ getJsonMock: vi.fn() }));
 
-vi.mock("../lib/tauri", () => ({ getJson: getJsonMock }));
+vi.mock("../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/tauri")>()), ...{ getJson: getJsonMock } }));
 
 import { StockCodeInput } from "./StockCodeInput";
 

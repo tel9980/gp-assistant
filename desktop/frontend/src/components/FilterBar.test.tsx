@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataStatus } from "../types";
 import { FilterBar } from "./FilterBar";
 
-vi.mock("../lib/tauri", () => ({
+vi.mock("../lib/tauri", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/tauri")>()),
   getTauriInvoke: vi.fn(() => null),
   postJson: vi.fn(),
   refreshTauriMarketData: vi.fn(),
