@@ -59,3 +59,9 @@ LlmSettingsPanel 6 / LlmSettingsPanel.drafts 5 / AgentPanel 1 / SettingsSheet 1�
 - `VITEST_NO_ISOLATE=1` — 打开非隔离（`vitest run` 会读 `desktop/frontend/vitest.config.ts`）。
 - 非隔离段固定 `maxWorkers=1`、`singleThread`、`sequence.shuffle=false`：
   只有固定单线程，模块图加载顺序才确定，失败才可复现。**不要**给它加并发。
+
+## 已知抖动
+
+`src/components/settings/BackupPanel.test.tsx` 的 5 个用例依赖微任务顺序，在 stdout 被管道
+背压时偶发失败（实测：输出重定向到文件 / 直接终端都过，`| cat` 时挂 5 条）。
+非隔离段已配 `retry: 1` 兜底；根治要把它改成 `await act(async () => {})` 包住所有异步断言。

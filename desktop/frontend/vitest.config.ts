@@ -31,6 +31,8 @@ export default mergeConfig(
             unstubGlobals: true,
             unstubEnvs: true,
             sequence: { shuffle: false, hooks: "stack" },
+            // 少数面板用例依赖微任务顺序（stdout 背压时会抖），给 1 次重试
+            retry: 1,
           }
         : {}),
       testTimeout: 20_000,
