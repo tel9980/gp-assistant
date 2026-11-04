@@ -212,12 +212,23 @@ npm run dev -- --no-watch
 
 ## 测试与发布检查
 
-运行前端测试：
+一条命令跑完静态契约 + 类型检查 + 单测 + 体积预算（跨平台，只用 node）：
+
+```powershell
+node scripts\verify.mjs          # 全量，约 40s
+node scripts\verify.mjs --fast   # 跳过构建与体积预算，约 22s
+```
+
+运行前端测试（735 个用例，两种跑法结果相同）：
 
 ```powershell
 cd desktop\frontend
-npm test
+npm run test:unit   # 全隔离，约 34s
+npm run test:fast   # 两段式，约 18s（推荐日常用）
 ```
+
+两段式的由来、跨文件污染的根因与测试文件写作约束见
+[docs/frontend-testing.md](docs/frontend-testing.md)。
 
 运行 Rust 测试：
 
