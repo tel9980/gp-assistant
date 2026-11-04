@@ -3,9 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { StockResearchPanel } from "./StockResearchPanel";
 
 const api = vi.hoisted(() => ({ getJson: vi.fn() }));
-vi.mock("../../lib/tauri", () => api);
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...(api) }));
 let renderer: ReactTestRenderer | undefined;
-afterEach(async () => { if (renderer) await act(async () => renderer?.unmount()); renderer = undefined; vi.clearAllMocks(); });
+afterEach(async () => {
+  if (renderer) await act(async () => renderer?.unmount());
+  renderer = undefined;
+  vi.clearAllMocks();
+});
 
 describe("StockResearchPanel", () => {
   it("only reads local status and clearly shows missing PIT evidence", async () => {

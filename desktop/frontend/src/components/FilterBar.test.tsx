@@ -1,6 +1,6 @@
 import { act, create } from "react-test-renderer";
 import type { ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DataStatus } from "../types";
 import { FilterBar } from "./FilterBar";
 
@@ -13,6 +13,10 @@ vi.mock("../lib/tauri", () => ({
 import { postJson } from "../lib/tauri";
 
 const postJsonMock = vi.mocked(postJson);
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("FilterBar", () => {
   let nextTimerId: number;

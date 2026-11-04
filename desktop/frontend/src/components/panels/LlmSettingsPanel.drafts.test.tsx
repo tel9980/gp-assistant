@@ -6,8 +6,10 @@ import { createLlmCredentialStore, type LlmSettingsSetter } from "../../lib/llmC
 import { clearSessionCredentials } from "../../lib/llmCredentialSession";
 import type { LlmSettings } from "../../types";
 const { postJsonMock } = vi.hoisted(() => ({ postJsonMock: vi.fn() }));
-vi.mock("../../lib/tauri", () => ({ postJson: postJsonMock }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({ postJson: postJsonMock }) }));
 vi.mock("react-dom", () => ({ createPortal: (children: unknown) => children }));
+// mock 与模块图在 isolate:false 下跨文件共享：afterEach 里恢复 tauri 模块的实现，
+// 避免把后一个测试文件的 postJson 替身带进来。
 import { LlmSettingsPanel } from "./LlmSettingsPanel";
 
 const SECRET = "synthetic-original-key";
@@ -56,7 +58,10 @@ beforeEach(() => {
   vi.stubGlobal("window", { requestAnimationFrame: (callback: () => void) => callback(), setTimeout: vi.fn() });
   postJsonMock.mockResolvedValue({ ok: true, status: 200, elapsed_ms: 20, endpoint: "https://gateway.example/v1/chat/completions" });
 });
-afterEach(async () => { for (const renderer of renderers.splice(0)) await act(async () => renderer.unmount()); postJsonMock.mockReset(); vi.unstubAllGlobals(); });
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+});
 
 describe("API drafts with the real credential queue", () => {
   it("saves only the selected provider, retains other drafts, and confirms discard on closing", async () => {

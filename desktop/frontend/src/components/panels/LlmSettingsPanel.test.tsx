@@ -5,11 +5,13 @@ import type { LlmConnectionTestResult, LlmSettings } from "../../types";
 
 const { postJsonMock } = vi.hoisted(() => ({ postJsonMock: vi.fn() }));
 
-vi.mock("../../lib/tauri", () => ({
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({
   postJson: postJsonMock,
-}));
+}) }));
 
 vi.mock("react-dom", () => ({ createPortal: (children: unknown) => children }));
+// mock 与模块图在 isolate:false 下跨文件共享：afterEach 里恢复 tauri 模块的实现，
+// 避免把后一个测试文件的 postJson 替身带进来。
 import { LlmSettingsPanel } from "./LlmSettingsPanel";
 
 const initialSettings: LlmSettings = {
@@ -244,7 +246,6 @@ describe("explicit API configuration drafts", () => {
     await act(async () => renderer.unmount());
   });
 });
-
 
 it("returns a requested model dialog to its external initiating control", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

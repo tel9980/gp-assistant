@@ -1,5 +1,5 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunDetail, AgentRunMetrics, AgentRunSummary } from "../../lib/agentRuns";
 import type { AgentStreamEvent } from "../../types";
 
@@ -203,12 +203,10 @@ function stubTestGlobals() {
 }
 
 beforeAll(async () => {
-  stubTestGlobals();
-  try {
-    ({ AgentRunDrawer, buildAgentRunTimeline } = await import("./AgentRunDrawer"));
-  } finally {
-    vi.unstubAllGlobals();
-  }
+  // 注意：这里不再 stub/restore 全局。模块顶层（tauri.ts 的 FRONTEND_BASE_URL 等）
+  // 只在首次 import 时读取 window，而 stub 一个假的 window 会永久污染同进程里的
+  // 其它测试文件（isolate:false 时）。全局还原统一放在文件末尾的 afterAll。
+  ({ AgentRunDrawer, buildAgentRunTimeline } = await import("./AgentRunDrawer"));
 });
 
 beforeEach(() => {
@@ -1275,4 +1273,8 @@ describe("AgentRunDrawer prompt overlay", () => {
     expect(text).toContain("rig-agent-runtime-v1");
     expect(text).not.toContain("退回内置");
   });
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
 });

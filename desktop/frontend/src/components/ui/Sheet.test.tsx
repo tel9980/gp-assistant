@@ -1,6 +1,10 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sheet } from "./Sheet";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Sheet", () => {
   const listeners = new Map<string, EventListener>();

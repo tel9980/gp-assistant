@@ -13,11 +13,11 @@ const tauriMocks = vi.hoisted(() => ({
   postJson: vi.fn(),
   mobile: false,
 }));
-vi.mock("../../lib/tauri", () => ({
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({
   getJson: tauriMocks.getJson,
   postJson: tauriMocks.postJson,
   isMobileTauriRuntime: () => tauriMocks.mobile,
-}));
+}) }));
 const { getJson, postJson } = tauriMocks;
 
 import {

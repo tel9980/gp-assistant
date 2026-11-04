@@ -1,10 +1,14 @@
 import { createRef } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/tauri", () => ({ getJson: vi.fn() }));
 
 import { Header } from "./Header";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Header", () => {
   beforeEach(() => {

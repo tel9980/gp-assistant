@@ -5,7 +5,7 @@ import { SentimentPanel } from "./SentimentPanel";
 
 const { postJson } = vi.hoisted(() => ({ postJson: vi.fn() }));
 const headerActions = vi.hoisted(() => ({ onRefresh: vi.fn(), onOpenKnowledge: vi.fn() }));
-vi.mock("../../lib/tauri", () => ({ postJson }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({ postJson }) }));
 vi.mock("./LlmSettingsPanel", () => ({ LlmSettingsPanel: (props: { openRequest?: number }) => <span data-model-open-request={props.openRequest} /> }));
 vi.mock("./NewsRagPanel", () => ({
   NewsRagPanel: (props: {
@@ -221,7 +221,6 @@ it("connects the stock search action to its input and keeps its visible label co
   expect(search.parent).toBe(toolbar);
 });
 
-
 it("folds management into More and opens the shared model dialog by request", async () => {
   await act(async () => { renderer = create(<SentimentPanel initialCode="600000.SH" llmSettings={null} />); });
   await click("显示顶栏工具");
@@ -236,7 +235,6 @@ it("folds management into More and opens the shared model dialog by request", as
   expect(renderer!.root.findByProps({ "data-model-open-request": 1 })).toBeDefined();
   expect(renderer!.root.findAllByProps({ className: "sentiment-title" })).toHaveLength(0);
 });
-
 
 it("closes the mobile stock drawer on selection and never installs its effects inside the hidden sentiment view", async () => {
   vi.stubGlobal("window", { matchMedia: (query: string) => ({ matches: query === "(max-width: 768px)", addEventListener: vi.fn(), removeEventListener: vi.fn() }) });

@@ -36,7 +36,7 @@ const gepaPanelMock = vi.hoisted(() => ({
   props: undefined as GepaPanelMockProps | undefined,
 }));
 
-vi.mock("../../lib/tauri", () => tauriMocks);
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...(tauriMocks) }));
 
 vi.mock("./AgentRunDrawer", () => ({
   AgentRunDrawer: (props: AgentRunDrawerProps) => {
@@ -857,7 +857,6 @@ describe("AgentPanel run replay interactions", () => {
     expect(quick.props["aria-pressed"]).toBe(true);
   });
 });
-
 
 describe("Agent durable drafts", () => {
   it("restores an unsent first-conversation draft after restart without auto-send", async () => {

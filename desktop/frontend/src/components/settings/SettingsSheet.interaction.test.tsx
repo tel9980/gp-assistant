@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
 
 vi.mock("../panels/LlmSettingsPanel", () => ({
   LlmSettingsPanel: () => null,
@@ -37,6 +37,10 @@ function SettingsHarness() {
     </>
   );
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("SettingsSheet interaction", () => {
   const values = new Map<string, string>();

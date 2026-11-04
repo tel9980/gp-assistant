@@ -85,7 +85,8 @@ const MOBILE_TENCENT_BATCHES_PER_STEP = 12;
 const MARKET_REFRESH_HISTORY_PREFETCH_LIMIT = 80;
 const OBSERVE_FULL_HISTORY_LIMIT = 10000;
 const OBSERVE_HISTORY_LIMIT = OBSERVE_FULL_HISTORY_LIMIT;
-const FRONTEND_BASE_URL = typeof window === "undefined" ? "http://localhost/" : window.location.href;
+const FRONTEND_BASE_URL =
+  typeof window === "undefined" || !window.location?.href ? "http://localhost/" : window.location.href;
 const BUNDLED_FINANCIAL_SNAPSHOT_URL = new URL("mobile-financial-snapshot.json", FRONTEND_BASE_URL).toString();
 const BUNDLED_INDUSTRY_SNAPSHOT_URL = new URL("mobile-industry-snapshot.json", FRONTEND_BASE_URL).toString();
 const DEDUCTED_FINANCIAL_FIELDS = [

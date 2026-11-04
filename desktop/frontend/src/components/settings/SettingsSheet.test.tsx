@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../panels/LlmSettingsPanel", () => ({
   LlmSettingsPanel: (props: { presentation?: string }) => (
@@ -8,6 +8,10 @@ vi.mock("../panels/LlmSettingsPanel", () => ({
 }));
 
 import { SettingsSheet } from "./SettingsSheet";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("SettingsSheet", () => {
   beforeEach(() => {

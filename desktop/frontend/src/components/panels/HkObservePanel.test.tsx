@@ -1,9 +1,9 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HkObservePanel } from "./HkObservePanel";
 import { getJson, postJson } from "../../lib/tauri";
 
-vi.mock("../../lib/tauri", () => ({ getJson: vi.fn(), postJson: vi.fn() }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({ getJson: vi.fn(), postJson: vi.fn() }) }));
 const getJsonMock = vi.mocked(getJson);
 const postJsonMock = vi.mocked(postJson);
 
@@ -33,6 +33,9 @@ const staleResult = {
   notes: ["报价：报价服务暂时不可用"],
   stale: true,
 };
+
+afterEach(() => {
+});
 
 describe("HkObservePanel stability", () => {
   beforeEach(() => { getJsonMock.mockReset(); postJsonMock.mockReset(); });

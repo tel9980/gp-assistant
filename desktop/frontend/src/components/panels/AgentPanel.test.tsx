@@ -31,6 +31,8 @@ function stubTestGlobals() {
 }
 
 beforeAll(async () => {
+  // 导入模块时不能留下假全局：stub 的 window/document 会被同进程后续测试文件继承
+  // （isolate:false 时模块图共享）。这里只在导入期间临时 stub，导入后立刻还原。
   stubTestGlobals();
   try {
     ({ AgentPanel, sanitizeAgentConversations } = await import("./AgentPanel"));

@@ -157,7 +157,6 @@ describe("ObservePanel requests", () => {
     await act(async () => renderer.unmount());
   });
 
-
   it("drops an in-flight observation when the code is edited before it returns", async () => {
     let resolveRequest: (value: unknown) => void = () => undefined;
     getJsonMock.mockImplementation((url: string) => {

@@ -1,10 +1,10 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HkMarketPanel } from "./HkMarketPanel";
 import { getJson, postJson } from "../../lib/tauri";
 import type { MarketCapability } from "../../lib/marketDomain";
 
-vi.mock("../../lib/tauri", () => ({ getJson: vi.fn(), postJson: vi.fn() }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({ getJson: vi.fn(), postJson: vi.fn() }) }));
 
 const getJsonMock = vi.mocked(getJson);
 const postJsonMock = vi.mocked(postJson);
@@ -16,6 +16,9 @@ const availableDirectoryCapability: MarketCapability = {
   reason: null,
   coverage: { requested_count: 1, available_count: 1, missing_count: 0, start_date: null, end_date: null, missing_fields: [] },
 };
+
+afterEach(() => {
+});
 
 describe("HkMarketPanel stability", () => {
   beforeEach(() => { getJsonMock.mockReset(); postJsonMock.mockReset(); });

@@ -1,11 +1,15 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useDensity } from "./useDensity";
 
 function DensityProbe() {
   const { density, toggleDensity } = useDensity();
   return <button type="button" onClick={toggleDensity}>{density}</button>;
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("useDensity", () => {
   const values = new Map<string, string>();

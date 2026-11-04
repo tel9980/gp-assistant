@@ -17,7 +17,7 @@ import { currentSystemDateInputValue } from "../../lib/format";
 
 const { getJsonMock, postJsonMock } = vi.hoisted(() => ({ getJsonMock: vi.fn(), postJsonMock: vi.fn() }));
 
-vi.mock("../../lib/tauri", () => ({ getJson: getJsonMock, postJson: postJsonMock }));
+vi.mock("../../lib/tauri", async (importOriginal) => ({ ...(await importOriginal()), ...({ getJson: getJsonMock, postJson: postJsonMock }) }));
 
 import { BacktestPanel } from "./BacktestPanel";
 

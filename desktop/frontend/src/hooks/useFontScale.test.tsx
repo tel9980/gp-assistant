@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useFontScale } from "./useFontScale";
 
 function FontScaleProbe() {
@@ -10,6 +10,10 @@ function FontScaleProbe() {
     </button>
   );
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("useFontScale", () => {
   const values = new Map<string, string>();
