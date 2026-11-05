@@ -296,28 +296,28 @@ fn replay_tool_trajectory(events: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn validate_gepa_trajectory(trajectory: &[Value]) -> Result<(), CommandError> {
+fn validate_gepa_trajectory(trajectory: &[Value]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     for step in trajectory {
         let tool = step["tool_name"].as_str().unwrap_or("unknown");
         if step["side_effect_class"] != "read_only" {
-            return Err(ce(format!(
+            return Err(format!(
                 "GEPA trajectory contains non-read-only tool {tool}"
-            )));
+            ));
         }
         if !matches!(step["status"].as_str(), Some("ok" | "degraded")) {
-            return Err(ce(format!(
+            return Err(format!(
                 "GEPA trajectory tool {tool} did not complete successfully"
-            )));
+            ));
         }
         let key = format!(
             "{tool}:{}",
             step["arguments_hash"].as_str().unwrap_or_default()
         );
         if !seen.insert(key) {
-            return Err(ce(format!(
+            return Err(format!(
                 "GEPA trajectory repeats the same read-only tool call: {tool}"
-            )));
+            ));
         }
     }
     Ok(())
