@@ -1,12 +1,11 @@
 # CI 构建与发布
 
-三个 workflow，都在 `.github/workflows/`：
+两个 workflow，都在 `.github/workflows/`：
 
 | 文件 | 触发 | 产物 |
 | --- | --- | --- |
 | `frontend.yml` | push / PR | 前端 735 用例 + 7 个契约脚本 + gp-core 的 fmt/test/clippy（不发布） |
 | `release-windows.yml` | 手动 `workflow_dispatch` | Windows NSIS 安装包 → GitHub Release |
-| `release-docker.yml` | 手动 / 改 Dockerfile 或依赖时 | 评测开发镜像 → GHCR |
 
 ## 发 Windows 安装包
 
@@ -21,22 +20,10 @@ Actions → **Release Windows installer** → Run workflow。可填 `tag`，留�
   （下载 RAG 嵌入模型 + 构建前端 + 准备 Android 资源），再 `tauri build --features gepa-lab`。
 - 首次冷构建约 25 分钟（Rust 依赖全量编译），rust-cache 命中后约 10 分钟。
 
-## 发评测 / 开发镜像
-
-镜像内容：Debian bookworm + Node 22 + Python 3.12 + Rust stable(rustfmt/clippy) +
-Tauri 构建依赖（webkit2gtk-4.1 等）+ deepeval 4.2.6。**不是可运行的应用镜像** ——
-主程序是 Tauri 桌面 GUI，只能在 Windows 上安装运行。
-
-```bash
-docker run --rm -v "$PWD":/workspace \
-  ghcr.io/tel9980/gp-assistant-dev:latest node scripts/verify.mjs
-```
-
-标签：`latest`、`v<version>`、`sha-<commit>`。GHCR 包默认是私有，要匿名拉取需在
-package 设置里改为 public；否则先 `docker login ghcr.io`（用有 `read:packages` 的 PAT）。
-
 ## 已知限制
 
 - `scripts/release-check.ps1` 依赖 PowerShell 与 Windows 打包链路，CI 里不跑；
   本机要发正式版仍用它。
 - `.github/workflows/rag-evaluation.yml` 需要外部模型服务，CI 上的失败多为环境缺失。
+- 曾经加过「评测/开发镜像」（GHCR）的 workflow 与 Dockerfile，已移除：本项目是 Tauri 桌面 GUI，
+  容器里只能装工具链、装不出能跑的应用，留着是死重量。
