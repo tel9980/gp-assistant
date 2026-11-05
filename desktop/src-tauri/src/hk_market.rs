@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::market_domain::{
     CapabilityId, CapabilityStatus, CoverageSummary, CurrencyCode, MarketCapability, MarketId,
     SecurityId, SecurityKind,
@@ -14,6 +15,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
+
+/// 港股模块的错误统一从这里出：保留原文，落到行情域错误码。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::MARKET_INTERNAL, message.to_string())
+}
 
 pub(crate) const HK_MARKET_DATA_FILE: &str = "hk-market-data.json";
 const HKEX_SECURITIES_SOURCE: &str =
@@ -55,24 +61,24 @@ impl HkSecurity {
     }
 }
 
-fn observation_security_id(security: &HkSecurity) -> Result<SecurityId, String> {
+fn observation_security_id(security: &HkSecurity) -> Result<SecurityId, CommandError> {
     if security.classification_status != HkClassificationStatus::VerifiedOrdinaryShare {
-        return Err(format!(
+        return Err(ce(format!(
             "HK security {} has unverified instrument classification; ordinary-share observation is disabled",
             security.code
-        ));
+        )));
     }
-    SecurityId::new(MarketId::Hk, &security.code, SecurityKind::OrdinaryShare)
+    SecurityId::new(MarketId::Hk, &security.code, SecurityKind::OrdinaryShare).map_err(ce)
 }
 
-fn ensure_hk_provider_ready(provider_id: &str) -> Result<(), String> {
+fn ensure_hk_provider_ready(provider_id: &str) -> Result<(), CommandError> {
     match provider_id {
         "frankfurter_ecb" => Ok(()),
-        "hkex" => Err("HKEX security-directory refresh is disabled until written permission for automated access is documented".to_owned()),
-        "tencent" => Err("Tencent HK quote/history refresh is disabled until provider-specific usage terms are documented".to_owned()),
-        "eastmoney_hk" => Err("Eastmoney HK financial refresh is disabled until provider-specific usage and redistribution terms are documented".to_owned()),
-        "hkexnews" => Err("HKEXnews metadata refresh is disabled until written permission for automated access is documented".to_owned()),
-        _ => Err(format!("unknown HK market-data provider {provider_id}; refresh is disabled until readiness is reviewed")),
+        "hkex" => Err(CommandError::new(codes::MARKET_NETWORK, "HKEX security-directory refresh is disabled until written permission for automated access is documented")),
+        "tencent" => Err(CommandError::new(codes::MARKET_NETWORK, "Tencent HK quote/history refresh is disabled until provider-specific usage terms are documented")),
+        "eastmoney_hk" => Err(CommandError::new(codes::MARKET_NETWORK, "Eastmoney HK financial refresh is disabled until provider-specific usage and redistribution terms are documented")),
+        "hkexnews" => Err(CommandError::new(codes::MARKET_NETWORK, "HKEXnews metadata refresh is disabled until written permission for automated access is documented")),
+        _ => Err(CommandError::new(codes::MARKET_INPUT, format!("unknown HK market-data provider {provider_id}; refresh is disabled until readiness is reviewed"))),
     }
 }
 
@@ -252,19 +258,19 @@ pub(crate) struct HkFinancialRefreshMergeResult {
 }
 
 pub(crate) trait HkFinancialProvider: Send + Sync {
-    fn endpoint(&self, code: &str) -> Result<String, String>;
+    fn endpoint(&self, code: &str) -> Result<String, CommandError>;
     fn parse(
         &self,
         text: &str,
         code: &str,
         fetched_at: &str,
-    ) -> Result<HkFinancialSnapshot, String>;
+    ) -> Result<HkFinancialSnapshot, CommandError>;
 }
 
 struct EastmoneyHkFinancialProvider;
 
 impl HkFinancialProvider for EastmoneyHkFinancialProvider {
-    fn endpoint(&self, code: &str) -> Result<String, String> {
+    fn endpoint(&self, code: &str) -> Result<String, CommandError> {
         let canonical =
             canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
         Ok(format!("{HK_FINANCIAL_ENDPOINT}?reportName=RPT_HKF10_FN_GMAININDICATOR&columns=ALL&filter=(SECUCODE%3D%22{canonical}.HK%22)&pageNumber=1&pageSize=1&sortColumns=REPORT_DATE&sortTypes=-1&source=HSF10&client=PC"))
@@ -275,25 +281,25 @@ impl HkFinancialProvider for EastmoneyHkFinancialProvider {
         text: &str,
         code: &str,
         fetched_at: &str,
-    ) -> Result<HkFinancialSnapshot, String> {
+    ) -> Result<HkFinancialSnapshot, CommandError> {
         parse_hk_financial_snapshot(text, code, fetched_at)
     }
 }
 
 pub(crate) trait HkDisclosureProvider: Send + Sync {
-    fn endpoint(&self, code: &str) -> Result<String, String>;
+    fn endpoint(&self, code: &str) -> Result<String, CommandError>;
     fn parse(
         &self,
         text: &str,
         code: &str,
         checked_at: &str,
-    ) -> Result<HkDisclosureMetadata, String>;
+    ) -> Result<HkDisclosureMetadata, CommandError>;
 }
 
 struct HkexNewsDisclosureProvider;
 
 impl HkDisclosureProvider for HkexNewsDisclosureProvider {
-    fn endpoint(&self, code: &str) -> Result<String, String> {
+    fn endpoint(&self, code: &str) -> Result<String, CommandError> {
         let canonical =
             canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
         Ok(format!("{HKEX_STOCK_SEARCH_ENDPOINT}?lang=EN&type=A&name={canonical}&market=SEHK&callback=callback"))
@@ -304,7 +310,7 @@ impl HkDisclosureProvider for HkexNewsDisclosureProvider {
         text: &str,
         code: &str,
         checked_at: &str,
-    ) -> Result<HkDisclosureMetadata, String> {
+    ) -> Result<HkDisclosureMetadata, CommandError> {
         parse_hk_disclosure_lookup(text, code, checked_at)
     }
 }
@@ -334,11 +340,15 @@ pub(crate) fn parse_hk_financial_snapshot(
     text: &str,
     code: &str,
     fetched_at: &str,
-) -> Result<HkFinancialSnapshot, String> {
+) -> Result<HkFinancialSnapshot, CommandError> {
     let canonical =
         canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| format!("decode HK financial payload failed: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("decode HK financial payload failed: {error}"),
+        )
+    })?;
     let row = value
         .get("result")
         .and_then(|result| result.get("data"))
@@ -458,16 +468,23 @@ fn sync_hk_financial_field_errors(snapshot: &mut HkFinancialSnapshot) {
     }
 }
 
-pub(crate) fn parse_hk_fx_rate(text: &str, fetched_at: &str) -> Result<HkFxRate, String> {
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| format!("decode HKD/CNY rate failed: {error}"))?;
+pub(crate) fn parse_hk_fx_rate(text: &str, fetched_at: &str) -> Result<HkFxRate, CommandError> {
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("decode HKD/CNY rate failed: {error}"),
+        )
+    })?;
     let base = value.get("base").and_then(serde_json::Value::as_str);
     let quote = value.get("quote").and_then(serde_json::Value::as_str);
     if base != Some("HKD") || quote != Some("CNY") {
-        return Err(format!(
-            "HKD/CNY provider response has an unexpected currency pair: {}/{}",
-            base.unwrap_or("missing"),
-            quote.unwrap_or("missing")
+        return Err(CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!(
+                "HKD/CNY provider response has an unexpected currency pair: {}/{}",
+                base.unwrap_or("missing"),
+                quote.unwrap_or("missing")
+            ),
         ));
     }
     let rate = value
@@ -578,7 +595,7 @@ pub(crate) fn parse_hk_disclosure_lookup(
     text: &str,
     code: &str,
     checked_at: &str,
-) -> Result<HkDisclosureMetadata, String> {
+) -> Result<HkDisclosureMetadata, CommandError> {
     let canonical =
         canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
     let json_text = text
@@ -586,8 +603,12 @@ pub(crate) fn parse_hk_disclosure_lookup(
         .strip_prefix("callback(")
         .and_then(|value| value.strip_suffix(");"))
         .unwrap_or(text.trim());
-    let value: serde_json::Value = serde_json::from_str(json_text)
-        .map_err(|error| format!("decode HKEXnews lookup failed: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(json_text).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("decode HKEXnews lookup failed: {error}"),
+        )
+    })?;
     let stock = value
         .get("stockInfo")
         .and_then(serde_json::Value::as_array)
@@ -606,12 +627,12 @@ pub(crate) fn parse_hk_disclosure_lookup(
 }
 
 #[cfg(test)]
-pub(crate) fn hkex_disclosure_endpoint(code: &str) -> Result<String, String> {
+pub(crate) fn hkex_disclosure_endpoint(code: &str) -> Result<String, CommandError> {
     HkexNewsDisclosureProvider.endpoint(code)
 }
 
 #[cfg(test)]
-pub(crate) fn eastmoney_hk_financial_endpoint(code: &str) -> Result<String, String> {
+pub(crate) fn eastmoney_hk_financial_endpoint(code: &str) -> Result<String, CommandError> {
     EastmoneyHkFinancialProvider.endpoint(code)
 }
 
@@ -786,7 +807,7 @@ pub(crate) async fn fetch_hk_financial_snapshot(
     client: &reqwest::Client,
     code: &str,
     fetched_at: &str,
-) -> Result<HkFinancialSnapshot, String> {
+) -> Result<HkFinancialSnapshot, CommandError> {
     ensure_hk_provider_ready("eastmoney_hk")?;
     fetch_hk_financial_snapshot_from(client, &EastmoneyHkFinancialProvider, code, fetched_at).await
 }
@@ -796,7 +817,7 @@ async fn fetch_hk_financial_snapshot_from(
     provider: &dyn HkFinancialProvider,
     code: &str,
     fetched_at: &str,
-) -> Result<HkFinancialSnapshot, String> {
+) -> Result<HkFinancialSnapshot, CommandError> {
     let url = provider.endpoint(code)?;
     let timeout = std::time::Duration::from_secs(HK_REQUEST_TIMEOUT_SECS);
     let text = fetch_hk_provider_text(
@@ -813,7 +834,7 @@ async fn fetch_hk_financial_snapshot_from(
 pub(crate) async fn fetch_hk_fx_rate(
     client: &reqwest::Client,
     fetched_at: &str,
-) -> Result<HkFxRate, String> {
+) -> Result<HkFxRate, CommandError> {
     ensure_hk_provider_ready("frankfurter_ecb")?;
     let timeout = std::time::Duration::from_secs(HK_REQUEST_TIMEOUT_SECS);
     let text =
@@ -825,7 +846,7 @@ pub(crate) async fn fetch_hk_disclosure_metadata(
     client: &reqwest::Client,
     code: &str,
     checked_at: &str,
-) -> Result<HkDisclosureMetadata, String> {
+) -> Result<HkDisclosureMetadata, CommandError> {
     ensure_hk_provider_ready("hkexnews")?;
     fetch_hk_disclosure_metadata_from(client, &HkexNewsDisclosureProvider, code, checked_at).await
 }
@@ -835,7 +856,7 @@ async fn fetch_hk_disclosure_metadata_from(
     provider: &dyn HkDisclosureProvider,
     code: &str,
     checked_at: &str,
-) -> Result<HkDisclosureMetadata, String> {
+) -> Result<HkDisclosureMetadata, CommandError> {
     let url = provider.endpoint(code)?;
     let timeout = std::time::Duration::from_secs(HK_REQUEST_TIMEOUT_SECS);
     let text = fetch_hk_provider_text(
@@ -1148,7 +1169,7 @@ pub(crate) fn parse_tencent_hk_quote(
     text: &str,
     code: &str,
     expected_currency: &CurrencyCode,
-) -> Result<HkQuote, String> {
+) -> Result<HkQuote, CommandError> {
     let code = canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
     let symbol = format!("hk{code}");
     let line = text
@@ -1162,7 +1183,9 @@ pub(crate) fn parse_tencent_hk_quote(
         .split('~')
         .collect::<Vec<_>>();
     if fields.len() < 76 {
-        return Err(format!("Tencent HK quote payload is incomplete for {code}"));
+        return Err(ce(format!(
+            "Tencent HK quote payload is incomplete for {code}"
+        )));
     }
     let name = fields[1].trim();
     let price = parse_f64(fields.get(3).copied())
@@ -1173,17 +1196,17 @@ pub(crate) fn parse_tencent_hk_quote(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     if name.is_empty() {
-        return Err(format!("Tencent HK quote has no valid name for {code}"));
+        return Err(ce(format!("Tencent HK quote has no valid name for {code}")));
     }
     let currency = fields
         .get(75)
         .and_then(|value| normalize_hk_currency(value))
         .ok_or_else(|| format!("Tencent HK quote has no valid currency for {code}"))?;
     if currency != expected_currency.as_str() {
-        return Err(format!(
+        return Err(ce(format!(
             "Tencent HK quote currency mismatch for {code}: expected {}, received {currency}",
             expected_currency.as_str()
-        ));
+        )));
     }
 
     Ok(HkQuote {
@@ -1207,11 +1230,18 @@ pub(crate) fn parse_tencent_hk_quote(
     })
 }
 
-pub(crate) fn parse_tencent_hk_history(text: &str, code: &str) -> Result<Vec<HkDailyBar>, String> {
+pub(crate) fn parse_tencent_hk_history(
+    text: &str,
+    code: &str,
+) -> Result<Vec<HkDailyBar>, CommandError> {
     let code = canonical_hk_code(code).ok_or_else(|| format!("invalid HK stock code: {code}"))?;
     let symbol = format!("hk{code}");
-    let value: serde_json::Value = serde_json::from_str(text)
-        .map_err(|error| format!("decode Tencent HK history failed: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("decode Tencent HK history failed: {error}"),
+        )
+    })?;
     let rows = value
         .get("data")
         .and_then(|data| data.get(&symbol))
@@ -1260,7 +1290,9 @@ pub(crate) fn parse_tencent_hk_history(text: &str, code: &str) -> Result<Vec<HkD
         });
     }
     if bars.is_empty() {
-        return Err(format!("Tencent returned no valid daily bars for {code}"));
+        return Err(ce(format!(
+            "Tencent returned no valid daily bars for {code}"
+        )));
     }
     bars.sort_by(|left, right| left.date.cmp(&right.date));
     bars.dedup_by(|left, right| left.date == right.date);
@@ -1336,7 +1368,7 @@ async fn fetch_hk_provider_text(
     timeout: std::time::Duration,
     max_bytes: usize,
     request_id: &str,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let context = crate::external_data::provider::ProviderContext {
         max_response_bytes: max_bytes,
         ..crate::external_data::provider::ProviderContext::new(request_id, timeout)
@@ -1364,7 +1396,7 @@ async fn fetch_hk_provider_text(
         context.cancellation.clone(),
     )
     .await
-    .map_err(|error| format!("{}: {}", error.category(), error.message()))
+    .map_err(|error| ce(format!("{}: {}", error.category(), error.message())))
 }
 
 impl crate::external_data::provider::DataProvider for HkexSecurityDirectoryProvider {
@@ -1580,7 +1612,7 @@ async fn fetch_explicit_hk_batch<P: crate::external_data::provider::DataProvider
     context: &crate::external_data::provider::ProviderContext,
     at: &str,
     foreground_recovery: bool,
-) -> Result<Vec<crate::external_data::StoredRecord>, String> {
+) -> Result<Vec<crate::external_data::StoredRecord>, CommandError> {
     ensure_hk_provider_ready(provider.source_id())?;
     let request_id = request
         .request_id
@@ -1670,7 +1702,7 @@ async fn fetch_explicit_hk_batch<P: crate::external_data::provider::DataProvider
                 Some(error.category()),
                 Some(error.message()),
             )?;
-            Err(format!("{}: {}", error.category(), error.message()))
+            Err(ce(format!("{}: {}", error.category(), error.message())))
         }
     }
 }
@@ -1691,7 +1723,7 @@ fn hk_refresh_idempotency_key(
     )
 }
 
-pub(crate) async fn resume_explicit_hk_refreshes(app: AppHandle) -> Result<Value, String> {
+pub(crate) async fn resume_explicit_hk_refreshes(app: AppHandle) -> Result<Value, CommandError> {
     let readiness_error = ensure_hk_provider_ready("tencent").err();
     let mut store = crate::external_data::open_app_store(&app)?;
     let runs = store.foreground_recoveries()?;
@@ -1786,12 +1818,12 @@ pub(crate) async fn resume_explicit_hk_refreshes(app: AppHandle) -> Result<Value
 pub(crate) async fn api_explicit_hk_refresh(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     use crate::external_data::{DataDomain, Market, RefreshRequest, RefreshScope};
     let domain = match payload.get("domain").and_then(Value::as_str) {
         Some("quote") => DataDomain::Quote,
         Some("daily_history") => DataDomain::DailyHistory,
-        Some(other) => return Err(format!("HK refresh does not support domain {other}")),
+        Some(other) => return Err(ce(format!("HK refresh does not support domain {other}"))),
         None => return Err("refresh domain is required".into()),
     };
     if payload.get("market").and_then(Value::as_str) != Some("hk") {
@@ -1860,11 +1892,11 @@ pub(crate) async fn api_explicit_hk_refresh(
 }
 
 trait RefreshScopeEntity {
-    fn entity_key(&self) -> Result<String, String>;
+    fn entity_key(&self) -> Result<String, CommandError>;
 }
 
 impl RefreshScopeEntity for crate::external_data::RefreshScope {
-    fn entity_key(&self) -> Result<String, String> {
+    fn entity_key(&self) -> Result<String, CommandError> {
         match self {
             Self::Entities { codes } if codes.len() == 1 => Ok(codes[0].clone()),
             _ => Err("expected one entity code in HK observation refresh".into()),
@@ -1899,21 +1931,27 @@ fn json_number(value: &serde_json::Value) -> Option<f64> {
 fn number_to_u64(value: f64) -> Option<u64> {
     (value >= 0.0 && value <= u64::MAX as f64).then_some(value.round() as u64)
 }
-pub(crate) fn parse_hkex_security_master(bytes: &[u8]) -> Result<Vec<HkSecurity>, String> {
+pub(crate) fn parse_hkex_security_master(bytes: &[u8]) -> Result<Vec<HkSecurity>, CommandError> {
     if bytes.is_empty() || bytes.len() > HKEX_MAX_WORKBOOK_BYTES {
-        return Err("HKEX securities workbook is empty or exceeds the 16 MiB limit".to_string());
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            "HKEX securities workbook is empty or exceeds the 16 MiB limit",
+        ));
     }
 
     let mut workbook: Xlsx<Cursor<&[u8]>> = open_workbook_from_rs(Cursor::new(bytes))
-        .map_err(|error| format!("open HKEX securities workbook failed: {error}"))?;
+        .map_err(|error| ce(format!("open HKEX securities workbook failed: {error}")))?;
     let sheet_name = workbook
         .sheet_names()
         .first()
         .cloned()
         .ok_or_else(|| "HKEX securities workbook has no worksheets".to_string())?;
-    let sheet = workbook
-        .worksheet_range(&sheet_name)
-        .map_err(|error| format!("read HKEX securities sheet failed: {error}"))?;
+    let sheet = workbook.worksheet_range(&sheet_name).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("read HKEX securities sheet failed: {error}"),
+        )
+    })?;
     let rows = sheet
         .rows()
         .map(|row| row.iter().map(cell_text).collect::<Vec<_>>())
@@ -1922,7 +1960,7 @@ pub(crate) fn parse_hkex_security_master(bytes: &[u8]) -> Result<Vec<HkSecurity>
     parse_hkex_security_rows(&rows)
 }
 
-fn parse_hkex_security_rows(rows: &[Vec<String>]) -> Result<Vec<HkSecurity>, String> {
+fn parse_hkex_security_rows(rows: &[Vec<String>]) -> Result<Vec<HkSecurity>, CommandError> {
     let headers = rows
         .iter()
         .enumerate()
@@ -2003,7 +2041,9 @@ fn parse_hkex_security_rows(rows: &[Vec<String>]) -> Result<Vec<HkSecurity>, Str
     }
 
     if securities.is_empty() {
-        return Err("HKEX securities workbook contains no supported ordinary shares".to_string());
+        return Err(ce(
+            "HKEX securities workbook contains no supported ordinary shares",
+        ));
     }
     securities.sort_by(|left, right| left.code.cmp(&right.code));
     Ok(securities)
@@ -2059,7 +2099,7 @@ fn parse_positive_u32(value: &str) -> Option<u32> {
     (parsed > 0).then_some(parsed)
 }
 
-pub(crate) fn read_hk_market_cache(path: &Path) -> Result<HkMarketCache, String> {
+pub(crate) fn read_hk_market_cache(path: &Path) -> Result<HkMarketCache, CommandError> {
     let database_path = external_hk_store_path(path)?;
     let mut store = crate::external_data::DataStore::open(&database_path)?;
     if path.exists() {
@@ -2077,27 +2117,42 @@ pub(crate) fn read_hk_market_cache(path: &Path) -> Result<HkMarketCache, String>
     read_hk_cache_from_store(&store)
 }
 
-fn read_hk_market_cache_legacy(path: &Path) -> Result<HkMarketCache, String> {
+fn read_hk_market_cache_legacy(path: &Path) -> Result<HkMarketCache, CommandError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(HkMarketCache::default());
         }
-        Err(error) => return Err(format!("read HK market cache failed: {error}")),
+        Err(error) => {
+            return Err(CommandError::new(
+                codes::MARKET_IO,
+                format!("read HK market cache failed: {error}"),
+            ))
+        }
     };
-    let cache: HkMarketCache = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("decode HK market cache failed: {error}"))?;
+    let cache: HkMarketCache = serde_json::from_slice(&bytes).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("decode HK market cache failed: {error}"),
+        )
+    })?;
     if cache.schema_version != 1 {
-        return Err(format!(
-            "unsupported HK market cache schema version: {}",
-            cache.schema_version
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            format!(
+                "unsupported HK market cache schema version: {}",
+                cache.schema_version
+            ),
         ));
     }
     Ok(cache)
 }
 
 #[cfg(test)]
-pub(crate) fn write_hk_market_cache(path: &Path, cache: &HkMarketCache) -> Result<(), String> {
+pub(crate) fn write_hk_market_cache(
+    path: &Path,
+    cache: &HkMarketCache,
+) -> Result<(), CommandError> {
     let _guard = HK_CACHE_WRITE_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -2105,11 +2160,14 @@ pub(crate) fn write_hk_market_cache(path: &Path, cache: &HkMarketCache) -> Resul
     write_hk_market_cache_inner(path, cache)
 }
 
-fn write_hk_market_cache_inner(path: &Path, cache: &HkMarketCache) -> Result<(), String> {
+fn write_hk_market_cache_inner(path: &Path, cache: &HkMarketCache) -> Result<(), CommandError> {
     if cache.schema_version != 1 {
-        return Err(format!(
-            "unsupported HK market cache schema version: {}",
-            cache.schema_version
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            format!(
+                "unsupported HK market cache schema version: {}",
+                cache.schema_version
+            ),
         ));
     }
     let database_path = external_hk_store_path(path)?;
@@ -2135,9 +2193,9 @@ fn write_hk_market_cache_inner(path: &Path, cache: &HkMarketCache) -> Result<(),
 pub(crate) fn update_hk_market_cache<F, T>(
     path: &Path,
     update: F,
-) -> Result<(HkMarketCache, T), String>
+) -> Result<(HkMarketCache, T), CommandError>
 where
-    F: FnOnce(&mut HkMarketCache) -> Result<T, String>,
+    F: FnOnce(&mut HkMarketCache) -> Result<T, CommandError>,
 {
     // Re-read after provider I/O, then serialize the cache read-modify-write with provider commits.
     let _guard = HK_CACHE_WRITE_LOCK
@@ -2150,13 +2208,17 @@ where
     Ok((cache, result))
 }
 
-fn write_hk_market_cache_legacy(path: &Path, cache: &HkMarketCache) -> Result<(), String> {
-    let bytes = serde_json::to_vec(cache)
-        .map_err(|error| format!("encode HK market cache failed: {error}"))?;
-    crate::durability::atomic_write_json(path, &bytes)
+fn write_hk_market_cache_legacy(path: &Path, cache: &HkMarketCache) -> Result<(), CommandError> {
+    let bytes = serde_json::to_vec(cache).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("encode HK market cache failed: {error}"),
+        )
+    })?;
+    crate::durability::atomic_write_json(path, &bytes).map_err(CommandError::from)
 }
 
-fn external_hk_store_path(path: &Path) -> Result<PathBuf, String> {
+fn external_hk_store_path(path: &Path) -> Result<PathBuf, CommandError> {
     let parent = path
         .parent()
         .ok_or_else(|| "HK cache path has no parent".to_string())?;
@@ -2502,7 +2564,7 @@ fn replace_hk_cache_domains_in_store(
         crate::external_data::DataDomain,
         crate::external_data::Market,
     )>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let mut grouped = hk_cache_records(cache);
     for (domain, market) in hk_cache_domains() {
         if !domains_to_replace.contains(&(domain, market)) {
@@ -2516,13 +2578,18 @@ fn replace_hk_cache_domains_in_store(
 
 fn read_hk_cache_from_store(
     store: &crate::external_data::DataStore,
-) -> Result<HkMarketCache, String> {
+) -> Result<HkMarketCache, CommandError> {
     use crate::external_data::{DataDomain, Market};
     let mut cache = HkMarketCache::default();
     for record in store.read_records(DataDomain::SecurityMaster, Market::HongKong, "hk")? {
         if record.record_key == "directory" {
-            cache.securities = serde_json::from_value(record.payload["items"].clone())
-                .map_err(|error| format!("decode HK security directory record: {error}"))?;
+            cache.securities =
+                serde_json::from_value(record.payload["items"].clone()).map_err(|error| {
+                    CommandError::new(
+                        codes::MARKET_PROVIDER,
+                        format!("decode HK security directory record: {error}"),
+                    )
+                })?;
             cache.securities_source = record.payload["source"]
                 .as_str()
                 .unwrap_or(&record.metadata.source_id)
@@ -2537,8 +2604,12 @@ fn read_hk_cache_from_store(
     for record in store.read_domain_records(DataDomain::Quote, Market::HongKong)? {
         match record.record_key.as_str() {
             "quote" => {
-                let quote: HkQuote = serde_json::from_value(record.payload)
-                    .map_err(|error| format!("decode HK quote record: {error}"))?;
+                let quote: HkQuote = serde_json::from_value(record.payload).map_err(|error| {
+                    CommandError::new(
+                        codes::MARKET_PROVIDER,
+                        format!("decode HK quote record: {error}"),
+                    )
+                })?;
                 cache.quotes.insert(record.entity_key, quote);
             }
             "error" => {
@@ -2554,8 +2625,13 @@ fn read_hk_cache_from_store(
     for record in store.read_domain_records(DataDomain::DailyHistory, Market::HongKong)? {
         match record.record_key.as_str() {
             "history" => {
-                let history: HkHistoryRecord = serde_json::from_value(record.payload)
-                    .map_err(|error| format!("decode HK history record: {error}"))?;
+                let history: HkHistoryRecord =
+                    serde_json::from_value(record.payload).map_err(|error| {
+                        CommandError::new(
+                            codes::MARKET_PROVIDER,
+                            format!("decode HK history record: {error}"),
+                        )
+                    })?;
                 cache.histories.insert(record.entity_key, history);
             }
             "error" => {
@@ -2572,7 +2648,12 @@ fn read_hk_cache_from_store(
         match record.record_key.as_str() {
             "snapshot" => {
                 let snapshot: HkFinancialSnapshot = serde_json::from_value(record.payload)
-                    .map_err(|error| format!("decode HK financial snapshot: {error}"))?;
+                    .map_err(|error| {
+                        CommandError::new(
+                            codes::MARKET_PROVIDER,
+                            format!("decode HK financial snapshot: {error}"),
+                        )
+                    })?;
                 cache.financials.insert(record.entity_key, snapshot);
             }
             "error" => {
@@ -2587,10 +2668,12 @@ fn read_hk_cache_from_store(
     }
     for record in store.read_domain_records(DataDomain::FxRate, Market::Global)? {
         if record.record_key == "rate" {
-            cache.fx_rate = Some(
-                serde_json::from_value(record.payload)
-                    .map_err(|error| format!("decode HK FX rate: {error}"))?,
-            );
+            cache.fx_rate = Some(serde_json::from_value(record.payload).map_err(|error| {
+                CommandError::new(
+                    codes::MARKET_PROVIDER,
+                    format!("decode HK FX rate: {error}"),
+                )
+            })?);
         } else if record.record_key == "error" {
             cache.fx_error = record.payload["error"].as_str().map(str::to_string);
         }
@@ -2599,7 +2682,12 @@ fn read_hk_cache_from_store(
         match record.record_key.as_str() {
             "metadata" => {
                 let disclosure: HkDisclosureMetadata = serde_json::from_value(record.payload)
-                    .map_err(|error| format!("decode HK disclosure metadata: {error}"))?;
+                    .map_err(|error| {
+                        CommandError::new(
+                            codes::MARKET_PROVIDER,
+                            format!("decode HK disclosure metadata: {error}"),
+                        )
+                    })?;
                 cache.disclosures.insert(record.entity_key, disclosure);
             }
             "error" => {
@@ -2627,7 +2715,7 @@ pub(crate) fn update_hkex_security_cache(
     path: &Path,
     workbook_bytes: &[u8],
     updated_at: &str,
-) -> Result<HkMarketCache, String> {
+) -> Result<HkMarketCache, CommandError> {
     let securities = parse_hkex_security_master(workbook_bytes)?;
     update_hk_market_cache(path, move |cache| {
         cache.securities = securities;
@@ -2647,11 +2735,13 @@ pub(crate) fn current_epoch_millis() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
-pub(crate) fn hk_market_data_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("resolve HK market data directory failed: {error}"))?;
+pub(crate) fn hk_market_data_path(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let mut path = app.path().app_data_dir().map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("resolve HK market data directory failed: {error}"),
+        )
+    })?;
     path.push(HK_MARKET_DATA_FILE);
     Ok(path)
 }
@@ -2661,7 +2751,7 @@ pub(crate) fn hk_market_cache_path(root: &Path) -> PathBuf {
 }
 
 #[tauri::command]
-pub(crate) fn api_hk_market_status(app: AppHandle) -> Result<serde_json::Value, String> {
+pub(crate) fn api_hk_market_status(app: AppHandle) -> Result<serde_json::Value, CommandError> {
     let path = hk_market_data_path(&app)?;
     let cache = read_hk_market_cache(&path)?;
     let external_data = crate::external_data::status_for_app(&app)?;
@@ -2685,7 +2775,9 @@ pub(crate) fn api_hk_market_status(app: AppHandle) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-pub(crate) async fn api_hk_market_refresh(app: AppHandle) -> Result<serde_json::Value, String> {
+pub(crate) async fn api_hk_market_refresh(
+    app: AppHandle,
+) -> Result<serde_json::Value, CommandError> {
     ensure_hk_provider_ready("hkex")?;
     let path = hk_market_data_path(&app)?;
     let timeout = std::time::Duration::from_secs(HK_REQUEST_TIMEOUT_SECS);
@@ -2744,7 +2836,7 @@ pub(crate) fn record_hkex_refresh_error(
     path: &Path,
     attempt_at: &str,
     error: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     update_hk_market_cache(path, |cache| {
         cache.securities_last_attempt_at = Some(attempt_at.to_string());
         cache.securities_last_error = Some(error.to_string());
@@ -2757,7 +2849,7 @@ pub(crate) fn record_hkex_refresh_error(
 pub(crate) fn api_hk_stock_search(
     app: AppHandle,
     payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, CommandError> {
     let cache = read_hk_market_cache(&hk_market_data_path(&app)?)?;
     let query = payload
         .get("query")
@@ -2790,7 +2882,7 @@ pub(crate) fn api_hk_stock_search(
 pub(crate) async fn api_hk_observe(
     app: AppHandle,
     payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, CommandError> {
     let path = hk_market_data_path(&app)?;
     let code = payload
         .get("code")
@@ -2889,11 +2981,20 @@ pub(crate) async fn api_hk_observe(
                 .into_iter()
                 .next()
                 .map(|record| {
-                    serde_json::from_value(record.payload)
-                        .map_err(|error| format!("decode refreshed HK quote: {error}"))
+                    serde_json::from_value(record.payload).map_err(|error| {
+                        CommandError::new(
+                            codes::MARKET_PROVIDER,
+                            format!("decode refreshed HK quote: {error}"),
+                        )
+                    })
                 })
                 .transpose()?
-                .ok_or_else(|| "Tencent returned no HK quote record".to_string()),
+                .ok_or_else(|| {
+                    CommandError::new(
+                        codes::MARKET_PROVIDER,
+                        "Tencent returned no HK quote record",
+                    )
+                }),
             Err(error) => Err(error),
         };
         let history = match history_batch {
@@ -2903,18 +3004,28 @@ pub(crate) async fn api_hk_observe(
                 .map(|record| {
                     serde_json::from_value::<HkHistoryRecord>(record.payload)
                         .map(|history| history.bars)
-                        .map_err(|error| format!("decode refreshed HK history: {error}"))
+                        .map_err(|error| {
+                            CommandError::new(
+                                codes::MARKET_PROVIDER,
+                                format!("decode refreshed HK history: {error}"),
+                            )
+                        })
                 })
                 .transpose()?
-                .ok_or_else(|| "Tencent returned no HK history record".to_string()),
+                .ok_or_else(|| {
+                    CommandError::new(
+                        codes::MARKET_PROVIDER,
+                        "Tencent returned no HK history record",
+                    )
+                }),
             Err(error) => Err(error),
         };
         let (updated_cache, result) = update_hk_market_cache(&path, |latest| {
-            Ok(merge_hk_observation_update(
+            Ok::<_, CommandError>(merge_hk_observation_update(
                 latest,
                 &code,
-                quote,
-                history,
+                quote.map_err(String::from),
+                history.map_err(String::from),
                 &fetched_at,
             ))
         })?;
@@ -2992,22 +3103,26 @@ pub(crate) async fn api_hk_observe(
 pub(crate) fn api_hk_financial_status(
     app: AppHandle,
     payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, CommandError> {
     let code = payload
         .get("code")
         .and_then(serde_json::Value::as_str)
         .and_then(canonical_hk_code)
         .ok_or_else(|| "请输入有效港股代码。".to_string())?;
     let cache = read_hk_market_cache(&hk_market_data_path(&app)?)?;
-    serde_json::to_value(build_hk_financial_result(&cache, &code))
-        .map_err(|error| format!("encode HK financial status failed: {error}"))
+    serde_json::to_value(build_hk_financial_result(&cache, &code)).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("encode HK financial status failed: {error}"),
+        )
+    })
 }
 
 #[tauri::command]
 pub(crate) async fn api_hk_financial_refresh(
     app: AppHandle,
     payload: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, CommandError> {
     let code = payload
         .get("code")
         .and_then(serde_json::Value::as_str)
@@ -3047,7 +3162,7 @@ pub(crate) async fn api_hk_financial_refresh(
             fetch_hk_disclosure_metadata(&client, &code, &fetched_at),
         ),
         Err(error) => {
-            let message = String::from(error);
+            let message = error.clone();
             (Err(message.clone()), Err(message.clone()), Err(message))
         }
     };
@@ -3060,7 +3175,7 @@ pub(crate) async fn api_hk_financial_refresh(
             crate::external_data::Market::HongKong,
             &fetched_at,
             financial.is_ok(),
-            financial.as_ref().err().map(String::as_str),
+            financial.as_ref().err().map(|error| error.message()),
         )?;
         record_hk_source_result(
             &store,
@@ -3069,7 +3184,7 @@ pub(crate) async fn api_hk_financial_refresh(
             crate::external_data::Market::Global,
             &fetched_at,
             fx.is_ok(),
-            fx.as_ref().err().map(String::as_str),
+            fx.as_ref().err().map(|error| error.message()),
         )?;
         record_hk_source_result(
             &store,
@@ -3078,16 +3193,24 @@ pub(crate) async fn api_hk_financial_refresh(
             crate::external_data::Market::HongKong,
             &fetched_at,
             disclosure.is_ok(),
-            disclosure.as_ref().err().map(String::as_str),
+            disclosure.as_ref().err().map(|error| error.message()),
         )?;
     }
     let (cache, _) = update_hk_market_cache(&path, |latest| {
         Ok(merge_hk_financial_refresh(
-            latest, &code, financial, fx, disclosure,
+            latest,
+            &code,
+            financial.map_err(String::from),
+            fx.map_err(String::from),
+            disclosure.map_err(String::from),
         ))
     })?;
-    serde_json::to_value(build_hk_financial_result(&cache, &code))
-        .map_err(|error| format!("encode HK financial refresh result failed: {error}"))
+    serde_json::to_value(build_hk_financial_result(&cache, &code)).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("encode HK financial refresh result failed: {error}"),
+        )
+    })
 }
 
 fn record_hk_source_result(
@@ -3098,9 +3221,11 @@ fn record_hk_source_result(
     at: &str,
     success: bool,
     error: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     if success {
-        store.record_source_success(source_id, domain, market, at, 1)
+        store
+            .record_source_success(source_id, domain, market, at, 1)
+            .map_err(CommandError::from)
     } else {
         let error = error.unwrap_or("provider request failed");
         let lower = error.to_ascii_lowercase();
@@ -3115,7 +3240,9 @@ fn record_hk_source_result(
         } else {
             "provider_error"
         };
-        store.record_source_failure(source_id, domain, market, at, category, error)
+        store
+            .record_source_failure(source_id, domain, market, at, category, error)
+            .map_err(CommandError::from)
     }
 }
 

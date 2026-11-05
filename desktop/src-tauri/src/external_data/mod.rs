@@ -257,7 +257,11 @@ pub(crate) async fn api_data_refresh(
         .and_then(Value::as_str)
         .unwrap_or("cn")
     {
-        "hk" => return crate::hk_market::api_explicit_hk_refresh(app, payload).await,
+        "hk" => {
+            return crate::hk_market::api_explicit_hk_refresh(app, payload)
+                .await
+                .map_err(String::from)
+        }
         "cn" => Market::China,
         other => return Err(format!("unsupported refresh market: {other}")),
     };
