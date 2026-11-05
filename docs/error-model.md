@@ -79,6 +79,17 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 
 同时 `with_app_store` / `with_app_store_snapshot` / `with_app_store_at_generation` / `with_recovered_app_database` / `with_shared_app_database` / `with_exclusive_app_database` 都改成了泛型 `E: From<String> + From<CommandError>`：老调用方（闭包返回 `Result<_, String>`）不用改，新调用方（`CommandError`）也能直接透传。
 
+### 迁移边界：第三方 trait 实现不要动签名
+
+`desktop/src-tauri/src/gepa_lab.rs` 里有两个 `dsrust-gepa` 的 trait 实现（`Evaluator::evaluate_valset_ids`、`Proposer::propose_new_texts`），trait 定义写死了 `Result<_, String>`。批量迁移把 `ce(...)` 塞进这两个 impl 后，Linux 本地能过，但 CI 的 Windows runner 编译 `lib test` 直接报：
+
+```
+error[E0277/E0271]: expected `{async block@gepa_lab.rs:694:13}` to be a future that resolves to
+`Result<Candidate, String>`, but it resolves to `Result<Candidate, CommandError>`
+```
+
+规则：**trait 签名是外部契约，不能跟着改**。做法是在 trait 边界转一次（`result.map(...).map_err(String::from)`、`Err("...".to_string())`），内部逻辑仍可用 `CommandError`。
+
 ## 迁移下一个模块的配方
 
 1. 在该模块里把签名 `Result<X, String>` 换成 `Result<X, CommandError>`（`use crate::error::{codes, CommandError};`）。
