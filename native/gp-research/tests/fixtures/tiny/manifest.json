@@ -23,22 +23,22 @@
     {
       "path": "securities.csv",
       "role": "securities",
-      "sha256": "e0306d7c9f792f620165dfdbc3ef1a5df6cc8bbf25596df3a441eede28019653"
+      "sha256": "e059128472f942894b9c25837fa1337290f1f2b179b33f306033ba6b6a26db14"
     },
     {
       "path": "daily_bars.csv",
       "role": "daily_bars",
-      "sha256": "7478c78d8ea51ec64ab6d17883f9138114d700018f66363a038296283700ad6b"
+      "sha256": "22589b6d0dd79d79d163073d94d73298d3f7aa110affb254017ca7fc2ad57db7"
     },
     {
       "path": "financial_events.csv",
       "role": "financial_events",
-      "sha256": "b80568cff900b80bb15da7eda172335ee886a3218fb98a9db25d9e50b3090310"
+      "sha256": "4db8bf5f99f19bbefdfb7f6ec66ce607d1b7161839b80adc671f39fe353f125d"
     },
     {
       "path": "daily_status.csv",
       "role": "daily_status",
-      "sha256": "b288f628d0ae53bbd6d1f317731b50bc97c8d815c7ab65069fc13f268d1e209e"
+      "sha256": "85f971f74cb38ac94a7ff025d281c283220f632c6fe639d688402e7fa167b813"
     },
     {
       "path": "corporate_actions.csv",
