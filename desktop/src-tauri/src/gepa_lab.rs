@@ -567,10 +567,10 @@ mod engine {
                 let replay = tokio::select! {
                     _ = self.cancellation.cancelled() => {
                         rig_runtime::request_cancel(&replay_run_id);
-                        Err(ce("GEPA run cancelled"))
+                        Err("GEPA run cancelled".to_string())
                     }
                     result = rig_runtime::execute_with_event_sink(payload, data, |event| events.push(event)) => {
-                        result.map(|outcome| outcome.response)
+                        result.map(|outcome| outcome.response).map_err(String::from)
                     }
                 };
                 let trajectory = replay_tool_trajectory(&events);
@@ -693,7 +693,7 @@ mod engine {
             let run_id = self.run_id.clone();
             async move {
                 if cancellation.is_cancelled() {
-                    return Err(ce("GEPA run cancelled"));
+                    return Err("GEPA run cancelled".to_string());
                 }
                 let config = rig_runtime::normalize_provider_config(&llm)?;
                 let model = rig_runtime::build_model_with_payload(&config, &llm).map_err(|e| {
@@ -707,7 +707,7 @@ mod engine {
                     json!({"message":"正在根据固定评测反馈反思方法卡"}),
                 );
                 let raw = tokio::select! {
-                    _ = cancellation.cancelled() => return Err(ce("GEPA run cancelled")),
+                    _ = cancellation.cancelled() => return Err("GEPA run cancelled".to_string()),
                     result = tokio::time::timeout(
                         Duration::from_secs(config.timeout_seconds.min(120).max(1)),
                         agent.prompt(prompt).run(),
@@ -720,7 +720,7 @@ mod engine {
                     Some(&llm),
                 );
                 if body.trim().is_empty() {
-                    return Err(ce("GEPA reflection returned an empty method card"));
+                    return Err("GEPA reflection returned an empty method card".to_string());
                 }
                 let mut next = candidate.clone();
                 next.insert("method_card", body);
