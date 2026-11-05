@@ -1,0 +1,93 @@
+name: Release Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (留空 = v<version>-ci.<run_number>)"
+        required: false
+      prerelease:
+        description: "标记为预发布"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build NSIS installer (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TAG_INPUT: ${{ inputs.tag }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Install npm deps (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Install npm deps (frontend)
+        working-directory: desktop/frontend
+        run: npm ci
+
+      # build:windows = prepare:windows（拉 RAG 模型 + 构建前端 + 准备 Android 资源）
+      #                + tauri build --features gepa-lab --config tauri.skip-beforebuild.json
+      - name: Build installer
+        working-directory: desktop
+        run: npm run build:windows
+
+      - name: Locate installer
+        id: locate
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Path desktop/src-tauri/target/release/bundle/nsis -Filter *.exe |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) { throw "NSIS installer not found" }
+          Write-Host "installer: $($exe.FullName) ($([math]::Round($exe.Length/1MB,1)) MB)"
+          "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ steps.locate.outputs.path }}
+          if-no-files-found: error
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          $tag = $env:TAG_INPUT
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v$version-ci.${{ github.run_number }}" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "release tag: $tag"
+
+      - name: Publish release
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.tag.outputs.tag }}"
+          $exe = "${{ steps.locate.outputs.path }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "股选优 $tag" --notes "CI 构建（commit ${{ github.sha }}）。安装包未做 Authenticode 签名。" --prerelease
+          }
+          gh release upload $tag $exe --clobber
