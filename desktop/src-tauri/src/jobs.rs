@@ -1,5 +1,6 @@
 //! Bounded, opt-in native job lifecycle. See docs/reliability/jobs-delivery.md.
 //! No request, result, native error text, credential, or URL is persisted.
+use crate::error::{codes, CommandError};
 use futures::FutureExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -17,6 +18,11 @@ use std::{
 use tauri::Manager;
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::JOBS_INTERNAL, message.to_string())
+}
+
 const SCHEMA_VERSION: i64 = 1;
 const MAX_RECORDS: usize = 10_000;
 const MAX_ACTIVE: usize = 16;
@@ -33,7 +39,7 @@ enum Kind {
     Index,
 }
 impl Kind {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, CommandError> {
         match value {
             "market_refresh" => Ok(Self::MarketRefresh),
             "backtest" => Ok(Self::Backtest),
@@ -82,7 +88,7 @@ struct Request {
     fingerprint: String,
 }
 impl Request {
-    fn new(kind: &str, mut payload: Value) -> Result<Self, String> {
+    fn new(kind: &str, mut payload: Value) -> Result<Self, CommandError> {
         let kind = Kind::parse(kind)?;
         let request_limit = if kind == Kind::PackImport {
             MAX_PACK_REQUEST_BYTES
@@ -128,7 +134,7 @@ impl Request {
             }
             _ => {}
         }
-        fn canonical(value: Value, depth: usize) -> Result<Value, String> {
+        fn canonical(value: Value, depth: usize) -> Result<Value, CommandError> {
             if depth > 32 {
                 return Err("job_payload_too_deep".into());
             }
@@ -172,10 +178,14 @@ impl Request {
 }
 
 // serde_json::to_vec would allocate the entire oversized output before rejecting it.
-fn bounded_json(value: &Value, limit: usize) -> Result<(), String> {
+fn bounded_json(value: &Value, limit: usize) -> Result<(), CommandError> {
     serialize_bounded(value, limit, None)
 }
-fn serialize_bounded(value: &Value, limit: usize, hash: Option<&mut Sha256>) -> Result<(), String> {
+fn serialize_bounded(
+    value: &Value,
+    limit: usize,
+    hash: Option<&mut Sha256>,
+) -> Result<(), CommandError> {
     struct Bounded<'a> {
         written: usize,
         limit: usize,
@@ -204,7 +214,7 @@ fn serialize_bounded(value: &Value, limit: usize, hash: Option<&mut Sha256>) -> 
     serde_json::to_writer(&mut writer, value).map_err(|_| "job_value_too_large".into())
 }
 
-fn valid_id(id: &str) -> Result<(), String> {
+fn valid_id(id: &str) -> Result<(), CommandError> {
     if id.is_empty()
         || id.len() > 80
         || !id
@@ -246,7 +256,7 @@ struct Store {
 }
 impl Store {
     /// Call exactly once per process, before exposing commands. Never on a status read.
-    fn open(path: &Path) -> Result<Self, String> {
+    fn open(path: &Path) -> Result<Self, CommandError> {
         if path.exists() {
             crate::durability::validate_sqlite_header(path).map_err(|_| STORE_ERROR)?;
         }
@@ -258,7 +268,10 @@ impl Store {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
         if version != 0 && version != SCHEMA_VERSION {
-            return Err("job_schema_unsupported".into());
+            return Err(CommandError::new(
+                codes::JOBS_INPUT,
+                "job_schema_unsupported",
+            ));
         }
         if version == 0 {
             let tables: i64 = conn
@@ -269,7 +282,10 @@ impl Store {
                 )
                 .map_err(db_error)?;
             if tables != 0 {
-                return Err("job_schema_unsupported".into());
+                return Err(CommandError::new(
+                    codes::JOBS_INPUT,
+                    "job_schema_unsupported",
+                ));
             }
         }
         crate::durability::configure_user_connection(&conn).map_err(|_| STORE_ERROR)?;
@@ -306,7 +322,7 @@ impl Store {
             limit: MAX_RECORDS,
         })
     }
-    fn duplicate(&mut self, id: &str, request: &Request) -> Result<(), String> {
+    fn duplicate(&mut self, id: &str, request: &Request) -> Result<(), CommandError> {
         let existing: Option<(String, String)> = self
             .conn
             .query_row(
@@ -339,7 +355,7 @@ impl Store {
         }
         Ok(())
     }
-    fn capacity(&self) -> Result<(), String> {
+    fn capacity(&self) -> Result<(), CommandError> {
         let count: i64 = self
             .conn
             .query_row("SELECT count(*) FROM jobs", [], |r| r.get(0))
@@ -350,14 +366,14 @@ impl Store {
             Ok(())
         }
     }
-    fn enqueue(&mut self, id: &str, request: &Request) -> Result<(), String> {
+    fn enqueue(&mut self, id: &str, request: &Request) -> Result<(), CommandError> {
         valid_id(id)?;
         self.duplicate(id, request)?;
         self.capacity()?;
         self.conn.execute("INSERT INTO jobs(job_id,kind,fingerprint,state,reason,created_at_ms,updated_at_ms) VALUES(?1,?2,?3,'queued','queued',?4,?4)", params![id,request.kind.name(),request.fingerprint,now()]).map_err(db_error)?;
         Ok(())
     }
-    fn running(&self, id: &str) -> Result<(), String> {
+    fn running(&self, id: &str) -> Result<(), CommandError> {
         let changed = self.conn.execute("UPDATE jobs SET state='running',reason='running',blocking_may_continue=1,side_effects_may_have_occurred=1,updated_at_ms=?2 WHERE job_id=?1 AND state='queued'", params![id,now()]).map_err(db_error)?;
         if changed != 1 {
             Err("job_cancelled".into())
@@ -371,11 +387,11 @@ impl Store {
         state: &str,
         reason: &str,
         uncertain: bool,
-    ) -> Result<JobStatus, String> {
+    ) -> Result<JobStatus, CommandError> {
         self.conn.execute("UPDATE jobs SET state=?2,reason=?3,blocking_may_continue=?4,cancel_requested=CASE WHEN ?2='cancelled' THEN 1 ELSE cancel_requested END,updated_at_ms=?5 WHERE job_id=?1 AND state IN ('queued','running')", params![id,state,reason,uncertain,now()]).map_err(db_error)?;
         self.status(id)
     }
-    fn cancel(&mut self, id: &str) -> Result<JobStatus, String> {
+    fn cancel(&mut self, id: &str) -> Result<JobStatus, CommandError> {
         valid_id(id)?;
         let exists: bool = self
             .conn
@@ -393,7 +409,7 @@ impl Store {
         }
         self.status(id)
     }
-    fn status(&self, id: &str) -> Result<JobStatus, String> {
+    fn status(&self, id: &str) -> Result<JobStatus, CommandError> {
         valid_id(id)?;
         self.conn.query_row("SELECT job_id,kind,state,reason,created_at_ms,updated_at_ms,cancel_requested,blocking_may_continue,side_effects_may_have_occurred FROM jobs WHERE job_id=?1", [id], |r| Ok(JobStatus {
             job_id:r.get(0)?, kind:r.get(1)?, state:r.get(2)?, reason:r.get(3)?, created_at_ms:r.get(4)?, updated_at_ms:r.get(5)?, cancel_requested:r.get(6)?, blocking_may_continue:r.get(7)?, side_effects_may_have_occurred:r.get(8)?,
@@ -415,7 +431,7 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct Jobs(Arc<Inner>);
 impl Jobs {
-    fn open(path: &Path) -> Result<Self, String> {
+    fn open(path: &Path) -> Result<Self, CommandError> {
         Ok(Self(Arc::new(Inner {
             store: Mutex::new(Store::open(path)?),
             store_lane: Arc::new(Semaphore::new(1)),
@@ -430,8 +446,8 @@ impl Jobs {
     }
     async fn store<T: Send + 'static>(
         &self,
-        task: impl FnOnce(&mut Store) -> Result<T, String> + Send + 'static,
-    ) -> Result<T, String> {
+        task: impl FnOnce(&mut Store) -> Result<T, CommandError> + Send + 'static,
+    ) -> Result<T, CommandError> {
         let inner = self.0.clone();
         // Metadata must not wait behind the native operation it is trying to cancel.
         let permit = tokio::time::timeout(
@@ -449,7 +465,7 @@ impl Jobs {
         .await
         .map_err(|_| STORE_ERROR)?
     }
-    async fn status(&self, id: String) -> Result<JobStatus, String> {
+    async fn status(&self, id: String) -> Result<JobStatus, CommandError> {
         self.store(move |s| s.status(&id)).await
     }
     fn signal(&self, id: &str) {
@@ -459,7 +475,7 @@ impl Jobs {
             }
         }
     }
-    async fn cancel(&self, id: String) -> Result<JobStatus, String> {
+    async fn cancel(&self, id: String) -> Result<JobStatus, CommandError> {
         valid_id(&id)?;
         // Signal without waiting for SQLite or a runtime IO permit. Store failure must not
         // prevent best-effort cooperative cancellation, but is still returned to the caller.
@@ -478,10 +494,10 @@ impl Jobs {
         request: Request,
         budget: Duration,
         work: F,
-    ) -> Result<Value, String>
+    ) -> Result<Value, CommandError>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Value, String>>,
+        Fut: Future<Output = Result<Value, CommandError>>,
     {
         valid_id(id)?;
         let deadline = tokio::time::Instant::now() + budget;
@@ -563,9 +579,11 @@ impl Jobs {
             tokio::pin!(future);
             tokio::select! {
                 biased;
-                _ = cancelled(&mut cancel) => Err("job_cancelled".into()),
-                _ = tokio::time::sleep_until(deadline) => Err("job_timed_out".into()),
-                result = &mut future => result.unwrap_or_else(|_| Err("job_native_panicked".into())),
+                _ = cancelled(&mut cancel) => Err(ce("job_cancelled")),
+                _ = tokio::time::sleep_until(deadline) => Err(ce("job_timed_out")),
+                result = &mut future => {
+                    result.unwrap_or_else(|_| Err(ce("job_native_panicked")))
+                }
             }
         };
         self.end(key, outcome, Some(blocking)).await
@@ -593,10 +611,10 @@ impl Jobs {
     async fn end(
         &self,
         key: String,
-        result: Result<Value, String>,
+        result: Result<Value, CommandError>,
         blocking: Option<Arc<crate::runtime::BlockingWork>>,
-    ) -> Result<Value, String> {
-        let (state, reason) = match result.as_ref().map_err(String::as_str) {
+    ) -> Result<Value, CommandError> {
+        let (state, reason) = match result.as_ref().map_err(|error| error.message()) {
             Ok(_) => ("completed", "ok"),
             Err("job_cancelled") => ("cancelled", "cancelled"),
             Err("job_timed_out") => ("failed", "timed_out"),
@@ -639,10 +657,10 @@ impl Jobs {
         }
         let status = persisted?;
         if status.state == "cancelled" {
-            return Err("job_cancelled".into());
+            return Err(ce("job_cancelled"));
         }
         if oversized {
-            return Err("job_result_too_large".into());
+            return Err(ce("job_result_too_large"));
         }
         result
     }
@@ -650,7 +668,7 @@ impl Jobs {
 
 /// Parent setup hook: call once on the setup thread before registering/exposing jobs.
 /// Repeated init is harmless; startup reconciliation is never repeated on status/run.
-pub(crate) fn init(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn init(app: &tauri::AppHandle) -> Result<(), CommandError> {
     // The parent must serialize setup; Tauri setup is single-threaded.
     if app.try_state::<Jobs>().is_some() {
         return Ok(());
@@ -666,7 +684,7 @@ pub(crate) fn init(app: &tauri::AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
-fn manager(app: &tauri::AppHandle) -> Result<Jobs, String> {
+fn manager(app: &tauri::AppHandle) -> Result<Jobs, CommandError> {
     app.try_state::<Jobs>()
         .map(|s| s.inner().clone())
         .ok_or_else(|| "jobs_not_initialized".into())
@@ -678,7 +696,7 @@ pub(crate) async fn api_job_run(
     job_id: String,
     kind: String,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let jobs = manager(&app)?;
     valid_id(&job_id)?;
     let request = Request::new(&kind, payload)?;
@@ -693,20 +711,20 @@ pub(crate) async fn api_job_run(
         .await
     })
     .await
-    .map_err(|_| "job_runner_interrupted".to_string())?
+    .map_err(|_| CommandError::new(codes::JOBS_IO, "job_runner_interrupted"))?
 }
 #[tauri::command]
 pub(crate) async fn api_job_status(
     app: tauri::AppHandle,
     job_id: String,
-) -> Result<JobStatus, String> {
+) -> Result<JobStatus, CommandError> {
     manager(&app)?.status(job_id).await
 }
 #[tauri::command]
 pub(crate) async fn api_job_cancel(
     app: tauri::AppHandle,
     job_id: String,
-) -> Result<JobStatus, String> {
+) -> Result<JobStatus, CommandError> {
     manager(&app)?.cancel(job_id).await
 }
 
@@ -717,22 +735,23 @@ pub(crate) fn has_active_work(app: &tauri::AppHandle) -> bool {
         .unwrap_or(true)
 }
 
-async fn dispatch(app: tauri::AppHandle, kind: Kind, payload: Value) -> Result<Value, String> {
+async fn dispatch(
+    app: tauri::AppHandle,
+    kind: Kind,
+    payload: Value,
+) -> Result<Value, CommandError> {
     match kind {
-        Kind::MarketRefresh => crate::market::api_market_refresh(app, payload)
-            .await
-            .map_err(String::from),
+        Kind::MarketRefresh => crate::market::api_market_refresh(app, payload).await,
         Kind::Backtest => crate::screening::api_backtest(app, payload).await,
         // Deliberately use the existing synchronous import primitive, not the command
         // that detaches embedding work. FTS is rebuilt by import_app_pack itself.
-        Kind::PackImport => crate::runtime::run_io_bound("job research pack import", move || {
-            crate::research::import_app_pack(&app, &payload)
-        })
-        .await?
-        .map_err(String::from),
-        Kind::Index => crate::research::api_research_rebuild_index(app)
-            .await
-            .map_err(String::from),
+        Kind::PackImport => {
+            crate::runtime::run_io_bound("job research pack import", move || {
+                crate::research::import_app_pack(&app, &payload)
+            })
+            .await?
+        }
+        Kind::Index => crate::research::api_research_rebuild_index(app).await,
     }
 }
 #[cfg(test)]

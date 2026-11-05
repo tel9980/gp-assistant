@@ -2,6 +2,7 @@
 mod financial_overlay;
 #[path = "local_data_policy.rs"]
 pub(crate) mod local_data_policy;
+use crate::error::{codes, CommandError};
 use crate::screening::local_data_policy::{self as local_data, DataPolicy};
 use futures::stream::{self, FuturesUnordered, StreamExt};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,11 +17,16 @@ use std::{
 use stock_optimizer_core as gp_core;
 use tauri::{Emitter, Manager};
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::SCREENING_INTERNAL, message.to_string())
+}
+
 pub(crate) fn local_snapshot(
     app: &tauri::AppHandle,
     payload: &Value,
     operation: &str,
-) -> Result<Arc<gp_core::CoreDataSet>, String> {
+) -> Result<Arc<gp_core::CoreDataSet>, CommandError> {
     DataPolicy::parse(payload)?;
     let data = crate::market::cached_market_data_snapshot(app).map_err(|error| {
         local_data::missing_error(
@@ -29,11 +35,14 @@ pub(crate) fn local_snapshot(
         )
     })?;
     if data.stocks.is_empty() {
-        return Err(local_data::missing_error(
-            operation,
-            &[
-                json!({"kind":"stock_universe", "reason":"No persisted market stocks. Refresh the market universe explicitly."}),
-            ],
+        return Err(CommandError::new(
+            codes::SCREENING_IO,
+            local_data::missing_error(
+                operation,
+                &[
+                    json!({"kind":"stock_universe", "reason":"No persisted market stocks. Refresh the market universe explicitly."}),
+                ],
+            ),
         ));
     }
     if !data
@@ -41,11 +50,14 @@ pub(crate) fn local_snapshot(
         .iter()
         .any(|stock| stock.price.is_finite() && stock.price > 0.0)
     {
-        return Err(local_data::missing_error(
-            operation,
-            &[
-                json!({"kind":"quotes", "reason":"No usable cached stock prices; refresh market quotes explicitly."}),
-            ],
+        return Err(CommandError::new(
+            codes::SCREENING_IO,
+            local_data::missing_error(
+                operation,
+                &[
+                    json!({"kind":"quotes", "reason":"No usable cached stock prices; refresh market quotes explicitly."}),
+                ],
+            ),
         ));
     }
     Ok(data)
@@ -247,7 +259,10 @@ pub(crate) struct PreparedBacktest {
 }
 
 #[tauri::command]
-pub(crate) async fn api_screen(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) async fn api_screen(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     if !legacy_screen_requested(&payload) {
         if let Some(result) =
             crate::stock_research_runtime::screen_if_selected(app.clone(), payload.clone()).await?
@@ -296,21 +311,27 @@ pub(crate) fn legacy_screen_requested(payload: &Value) -> bool {
         .is_some_and(|algorithm| algorithm.eq_ignore_ascii_case("legacy_balanced"))
 }
 
-pub(crate) async fn adaptive_screen_with_timeout<T>(
+pub(crate) async fn adaptive_screen_with_timeout<T, E>(
     duration: Duration,
-    future: impl std::future::Future<Output = Result<T, String>>,
-) -> Result<T, String> {
-    tokio::time::timeout(duration, future).await.map_err(|_| {
-        format!(
-            "智能选股端到端计算超过 {ADAPTIVE_SCREEN_TOTAL_TIMEOUT_SECS} 秒，请检查网络或刷新行情后重试"
-        )
-    })?
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, CommandError>
+where
+    E: Into<CommandError>,
+{
+    tokio::time::timeout(duration, future)
+        .await
+        .map_err(|_| {
+            ce(format!(
+                "智能选股端到端计算超过 {ADAPTIVE_SCREEN_TOTAL_TIMEOUT_SECS} 秒，请检查网络或刷新行情后重试"
+            ))
+        })?
+        .map_err(Into::into)
 }
 
 pub(crate) async fn api_adaptive_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let transport = payload.clone();
     let diagnostics_enabled = crate::perf_diagnostics::requested(&transport);
     let cache_strategy = if transport.get("data_policy").and_then(Value::as_str) == Some("refresh")
@@ -530,7 +551,7 @@ pub(crate) async fn api_adaptive_screen(
 pub(crate) async fn api_legacy_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let transport = payload.clone();
     let data = local_snapshot(&app, &payload, "api_legacy_screen")?;
@@ -573,7 +594,7 @@ pub(crate) async fn api_legacy_screen(
 
 pub(crate) fn legacy_screen_criteria_from_payload(
     mut payload: Value,
-) -> Result<gp_core::ScreenCriteria, String> {
+) -> Result<gp_core::ScreenCriteria, CommandError> {
     let nested = payload.get("criteria").is_some();
     let legacy_limit = if nested {
         payload.get("primary_limit")
@@ -591,20 +612,35 @@ pub(crate) fn legacy_screen_criteria_from_payload(
         object.remove("internal_algorithm");
         object.insert("limit".to_string(), json!(legacy_limit));
     }
-    serde_json::from_value::<gp_core::ScreenCriteria>(local_data::core_payload(payload))
-        .map_err(|error| format!("invalid legacy screen request: {error}"))
+    serde_json::from_value::<gp_core::ScreenCriteria>(local_data::core_payload(payload)).map_err(
+        |error| {
+            CommandError::new(
+                codes::SCREENING_INPUT,
+                format!("invalid legacy screen request: {error}"),
+            )
+        },
+    )
 }
 
 pub(crate) fn adaptive_screen_request_from_payload(
     payload: Value,
-) -> Result<gp_core::AdaptiveScreenRequest, String> {
+) -> Result<gp_core::AdaptiveScreenRequest, CommandError> {
     let payload = local_data::core_payload(payload);
     if payload.get("criteria").is_some() {
-        serde_json::from_value(payload)
-            .map_err(|error| format!("invalid adaptive screen request: {error}"))
+        serde_json::from_value(payload).map_err(|error| {
+            CommandError::new(
+                codes::SCREENING_INPUT,
+                format!("invalid adaptive screen request: {error}"),
+            )
+        })
     } else {
-        let criteria = serde_json::from_value::<gp_core::ScreenCriteria>(payload)
-            .map_err(|error| format!("invalid legacy screen request: {error}"))?;
+        let criteria =
+            serde_json::from_value::<gp_core::ScreenCriteria>(payload).map_err(|error| {
+                CommandError::new(
+                    codes::SCREENING_INPUT,
+                    format!("invalid legacy screen request: {error}"),
+                )
+            })?;
         Ok(gp_core::AdaptiveScreenRequest {
             criteria,
             ..gp_core::AdaptiveScreenRequest::default()
@@ -673,7 +709,7 @@ pub(crate) fn adaptive_screen_progress_payload(
 pub(crate) async fn api_sector_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let transport = payload.clone();
     let data = local_snapshot(&app, &payload, "api_sector_screen")?;
@@ -681,7 +717,7 @@ pub(crate) async fn api_sector_screen(
     let stock_override = screen_stock_override(&app, &data, &payload)?;
     let request =
         serde_json::from_value::<gp_core::SectorScreenRequest>(local_data::core_payload(payload))
-            .map_err(|error| format!("invalid sector screen request: {error}"))?;
+            .map_err(|error| ce(format!("invalid sector screen request: {error}")))?;
     let mut result = crate::runtime::run_cpu_bound("api_sector_screen", move || {
         let result = match stock_override.as_deref() {
             Some(stocks) => gp_core::sector_screen_stocks(stocks, &request),
@@ -699,7 +735,7 @@ pub(crate) async fn api_sector_screen(
 pub(crate) async fn api_custom_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     run_graph_screen_command("api_custom_screen", app, payload).await
 }
 
@@ -707,7 +743,7 @@ pub(crate) async fn api_custom_screen(
 pub(crate) async fn api_graph_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     run_graph_screen_command("api_graph_screen", app, payload).await
 }
 
@@ -715,14 +751,14 @@ pub(crate) async fn api_graph_screen(
 pub(crate) async fn api_trend_analyze(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let transport = payload.clone();
     let data = local_snapshot(&app, &payload, "api_trend_analyze")?;
     let stock_override = screen_stock_override(&app, &data, &payload)?;
     let request =
         serde_json::from_value::<gp_core::TrendIndicatorRequest>(local_data::core_payload(payload))
-            .map_err(|error| format!("invalid trend request: {error}"))?;
+            .map_err(|error| ce(format!("invalid trend request: {error}")))?;
     let coverage = local_history_coverage(
         data.as_ref(),
         &HashMap::new(),
@@ -751,14 +787,14 @@ pub(crate) async fn api_trend_analyze(
 pub(crate) async fn api_trend_screen(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     api_trend_screen_inner(app, payload).await
 }
 
 pub(crate) async fn api_trend_screen_inner(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let transport = payload.clone();
     let prepared = tokio::time::timeout(
         Duration::from_secs(TREND_SCREEN_HISTORY_TIMEOUT_SECS),
@@ -806,7 +842,10 @@ pub(crate) fn backtest_history_timeout_secs(payload: &Value) -> u64 {
 }
 
 #[tauri::command]
-pub(crate) async fn api_backtest(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) async fn api_backtest(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     if let Some(result) =
         crate::stock_research_runtime::backtest_if_selected(app.clone(), payload.clone()).await?
     {
@@ -861,7 +900,7 @@ pub(crate) async fn api_backtest(app: tauri::AppHandle, payload: Value) -> Resul
             legacy_request.strategy_mode = "walk_forward".to_string();
             legacy_request.criteria.score_profile = "balanced".to_string();
             let legacy = gp_core::backtest_with_source(&source, &legacy_request)
-                .map_err(|error| format!("legacy balanced comparison failed: {error}"))?;
+                .map_err(|error| ce(format!("legacy balanced comparison failed: {error}")))?;
             let precision_pair = (request.top_n == 10)
                 .then_some((legacy.metrics.precision_at_n, result.metrics.precision_at_n));
             let release_qualification =
@@ -922,14 +961,14 @@ pub(crate) async fn api_backtest(app: tauri::AppHandle, payload: Value) -> Resul
                 .cloned()
                 .ok_or_else(|| "adaptive release gate input is missing".to_string())?,
         )
-        .map_err(|error| format!("invalid adaptive release gate input: {error}"))?;
+        .map_err(|error| ce(format!("invalid adaptive release gate input: {error}")))?;
         let gate_report = serde_json::from_value::<gp_core::AdaptiveReleaseGateReport>(
             result
                 .get("adaptive_release_gate")
                 .cloned()
                 .ok_or_else(|| "adaptive release gate report is missing".to_string())?,
         )
-        .map_err(|error| format!("invalid adaptive release gate report: {error}"))?;
+        .map_err(|error| ce(format!("invalid adaptive release gate report: {error}")))?;
         let qualification = result
             .get("adaptive_release_qualification")
             .cloned()
@@ -1148,7 +1187,7 @@ pub(crate) fn adaptive_release_backtest_qualification(
 }
 
 #[tauri::command]
-pub(crate) fn api_strategies() -> Result<Value, String> {
+pub(crate) fn api_strategies() -> Result<Value, CommandError> {
     Ok(json!({
         "strategies": [
             {
@@ -1267,7 +1306,7 @@ where
 pub(crate) async fn prepare_adaptive_screen(
     app: &tauri::AppHandle,
     payload: Value,
-) -> Result<PreparedAdaptiveScreen, String> {
+) -> Result<PreparedAdaptiveScreen, CommandError> {
     let diagnostics_enabled = crate::perf_diagnostics::requested(&payload);
     let cache_prepare_started = Instant::now();
     let force_cold_start = adaptive_release_validation_force_cold_start(&payload);
@@ -1743,13 +1782,13 @@ pub(crate) fn adaptive_history_cache_is_usable(
 pub(crate) async fn prepare_trend_screen(
     app: &tauri::AppHandle,
     payload: Value,
-) -> Result<PreparedTrendScreen, String> {
+) -> Result<PreparedTrendScreen, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let data = local_snapshot(app, &payload, "trend_screen")?;
     let stock_override = screen_stock_override(app, &data, &payload)?;
     let request =
         serde_json::from_value::<gp_core::TrendScreenRequest>(local_data::core_payload(payload))
-            .map_err(|error| format!("invalid trend screen request: {error}"))?;
+            .map_err(|error| ce(format!("invalid trend screen request: {error}")))?;
     let candidate_request = request.clone();
     let candidate_data = Arc::clone(&data);
     let candidate_stocks = stock_override.clone();
@@ -1897,7 +1936,7 @@ pub(crate) async fn prepare_trend_screen(
 pub(crate) async fn prepare_backtest(
     app: &tauri::AppHandle,
     payload: Value,
-) -> Result<PreparedBacktest, String> {
+) -> Result<PreparedBacktest, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let data = local_snapshot(app, &payload, "backtest")?;
     // Backtests use the persisted market snapshot and their own history preparation path.
@@ -1906,9 +1945,9 @@ pub(crate) async fn prepare_backtest(
     let stock_override = None;
     let request =
         serde_json::from_value::<gp_core::BacktestRequest>(local_data::core_payload(payload))
-            .map_err(|error| format!("invalid backtest request: {error}"))?;
+            .map_err(|error| ce(format!("invalid backtest request: {error}")))?;
     gp_core::validate_backtest_date_range(&request)
-        .map_err(|error| format!("invalid backtest date range: {error}"))?;
+        .map_err(|error| ce(format!("invalid backtest date range: {error}")))?;
     let adaptive_backtest = request
         .strategy_mode
         .trim()
@@ -2099,11 +2138,11 @@ pub(crate) async fn prepare_backtest(
         }
     }
     if fetched == 0 && !missing.is_empty() {
-        return Err(format!(
+        return Err(ce(format!(
             "无法获取回测所需的历史日线（{} 只）：{}",
             missing.len(),
             failure_samples.join("；")
-        ));
+        )));
     }
     if !history_patch.is_empty() {
         let patch = json!({ "histories": history_patch });
@@ -2156,9 +2195,9 @@ pub(crate) fn backtest_history_requirements(
     data: &gp_core::CoreDataSet,
     stocks: Option<&[gp_core::StockItem]>,
     request: &gp_core::BacktestRequest,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, CommandError> {
     let source = gp_core::StaticDataSource::with_overrides(data, stocks, None);
-    gp_core::backtest_required_history_symbols(&source, request).map_err(|error| error.to_string())
+    gp_core::backtest_required_history_symbols(&source, request).map_err(|error| ce(error))
 }
 
 pub(crate) fn backtest_history_rows_are_usable(rows: &[Value]) -> bool {
@@ -2195,7 +2234,7 @@ pub(crate) fn normalize_trend_prefetch_codes<'a>(
 pub(crate) fn screen_financial_snapshot(
     app: &tauri::AppHandle,
     payload: &Value,
-) -> Result<Option<Arc<Value>>, String> {
+) -> Result<Option<Arc<Value>>, CommandError> {
     if let Some(snapshot) = payload
         .get("financial_snapshot")
         .filter(|snapshot| crate::market::financial_snapshot_payload_present(snapshot))
@@ -2222,7 +2261,7 @@ pub(crate) fn screen_stock_override(
     app: &tauri::AppHandle,
     data: &Arc<gp_core::CoreDataSet>,
     payload: &Value,
-) -> Result<Option<Arc<Vec<gp_core::StockItem>>>, String> {
+) -> Result<Option<Arc<Vec<gp_core::StockItem>>>, CommandError> {
     let Some(financial_snapshot) = screen_financial_snapshot(app, payload)? else {
         return Ok(None);
     };
@@ -2259,7 +2298,7 @@ pub(crate) async fn run_graph_screen_command(
     label: &'static str,
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let transport = payload.clone();
     let data = local_snapshot(&app, &payload, "run_graph_screen_command")?;
@@ -2267,7 +2306,7 @@ pub(crate) async fn run_graph_screen_command(
     let stock_override = screen_stock_override(&app, &data, &payload)?;
     let request =
         serde_json::from_value::<gp_core::GraphScreenRequest>(local_data::core_payload(payload))
-            .map_err(|error| format!("invalid graph screen request: {error}"))?;
+            .map_err(|error| ce(format!("invalid graph screen request: {error}")))?;
     let mut result = crate::runtime::run_cpu_bound(label, move || {
         let source = match stock_override.as_deref() {
             Some(stocks) => gp_core::StaticDataSource::with_stocks(data.as_ref(), stocks),
@@ -2308,19 +2347,23 @@ pub(crate) fn merge_screen_financial_snapshot_into_data(
     }
 }
 
-pub(crate) fn adaptive_screen_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn adaptive_screen_db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("get app data dir failed: {error}"))?;
+        .map_err(|error| ce(format!("get app data dir failed: {error}")))?;
     root.push("screening");
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("create screening dir failed: {}: {error}", root.display()))?;
+    fs::create_dir_all(&root).map_err(|error| {
+        ce(format!(
+            "create screening dir failed: {}: {error}",
+            root.display()
+        ))
+    })?;
     root.push(ADAPTIVE_SCREEN_DB_FILE);
     Ok(root)
 }
 
-pub(crate) fn initialize_adaptive_exposure_db(conn: &Connection) -> Result<(), String> {
+pub(crate) fn initialize_adaptive_exposure_db(conn: &Connection) -> Result<(), CommandError> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
@@ -2394,10 +2437,10 @@ pub(crate) fn initialize_adaptive_exposure_db(conn: &Connection) -> Result<(), S
              PRIMARY KEY (algorithm_version, implementation_fingerprint)
          );",
     )
-    .map_err(|error| format!("initialize adaptive screen sqlite failed: {error}"))
+    .map_err(|error| ce(format!("initialize adaptive screen sqlite failed: {error}")))
 }
 
-pub(crate) fn open_adaptive_screen_db(app: &tauri::AppHandle) -> Result<Connection, String> {
+pub(crate) fn open_adaptive_screen_db(app: &tauri::AppHandle) -> Result<Connection, CommandError> {
     let path = adaptive_screen_db_path(app)?;
     let conn = Connection::open(&path).map_err(|error| {
         format!(
@@ -2438,7 +2481,7 @@ pub(crate) fn adaptive_release_run_record_rows(
     elapsed_millis: u64,
     cache_hit: bool,
     release_evidence_qualified: bool,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     initialize_adaptive_exposure_db(conn)?;
     let trade_date = crate::market::compact_date_key(trade_date)
         .ok_or_else(|| "adaptive screen run trade date is invalid".to_string())?;
@@ -2450,7 +2493,7 @@ pub(crate) fn adaptive_release_run_record_rows(
         .map(str::to_string)
         .unwrap_or_else(|| format!("compat-{trade_date}-{recorded_at}"));
     let selected_codes_json = serde_json::to_string(&adaptive_selected_codes(result))
-        .map_err(|error| format!("serialize adaptive run symbols failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize adaptive run symbols failed: {error}")))?;
     let algorithm_version = result
         .get("algorithm_version")
         .and_then(Value::as_str)
@@ -2460,7 +2503,7 @@ pub(crate) fn adaptive_release_run_record_rows(
         "DELETE FROM adaptive_screen_runs_v3 WHERE recorded_at < ?1",
         params![keep_after],
     )
-    .map_err(|error| format!("prune adaptive run evidence failed: {error}"))?;
+    .map_err(|error| ce(format!("prune adaptive run evidence failed: {error}")))?;
     conn.execute(
         "INSERT INTO adaptive_screen_runs_v3
            (run_id, implementation_fingerprint, release_evidence_qualified, trade_date, selected_codes_json, elapsed_millis, cache_hit, algorithm_version, recorded_at)
@@ -2485,7 +2528,7 @@ pub(crate) fn adaptive_release_run_record_rows(
             recorded_at
         ],
     )
-    .map_err(|error| format!("record adaptive run evidence failed: {error}"))?;
+    .map_err(|error| ce(format!("record adaptive run evidence failed: {error}")))?;
     adaptive_release_gate_recompute_operational_rows(conn)?;
     Ok(())
 }
@@ -2498,7 +2541,7 @@ pub(crate) fn adaptive_release_run_record_sync(
     elapsed_millis: u64,
     cache_hit: bool,
     release_evidence_qualified: bool,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     adaptive_release_run_record_rows(
         &open_adaptive_screen_db(app)?,
         run_id,
@@ -2512,7 +2555,7 @@ pub(crate) fn adaptive_release_run_record_sync(
 
 pub(crate) fn adaptive_release_operational_evidence_rows(
     conn: &Connection,
-) -> Result<(Option<usize>, Option<u64>, Option<u64>), String> {
+) -> Result<(Option<usize>, Option<u64>, Option<u64>), CommandError> {
     initialize_adaptive_exposure_db(conn)?;
     let keep_after = (crate::market::epoch_millis().min(i64::MAX as u128) as i64)
         .saturating_sub(30 * 24 * 60 * 60 * 1_000);
@@ -2527,15 +2570,19 @@ pub(crate) fn adaptive_release_operational_evidence_rows(
                    AND recorded_at >= ?2
                  ORDER BY recorded_at ASC, id ASC",
             )
-            .map_err(|error| format!("prepare adaptive run coverage query failed: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "prepare adaptive run coverage query failed: {error}"
+                ))
+            })?;
         let rows = statement
             .query_map(
                 params![adaptive_release_implementation_fingerprint(), keep_after],
                 |row| row.get::<_, String>(0),
             )
-            .map_err(|error| format!("query adaptive run coverage failed: {error}"))?;
+            .map_err(|error| ce(format!("query adaptive run coverage failed: {error}")))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read adaptive run coverage failed: {error}"))?
+            .map_err(|error| ce(format!("read adaptive run coverage failed: {error}")))?
     };
     let parsed_runs = recent_json
         .into_iter()
@@ -2547,7 +2594,7 @@ pub(crate) fn adaptive_release_operational_evidence_rows(
                         .map(|code| code.to_ascii_uppercase())
                         .collect::<HashSet<_>>()
                 })
-                .map_err(|error| format!("parse adaptive run symbols failed: {error}"))
+                .map_err(|error| ce(format!("parse adaptive run symbols failed: {error}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let five_run_unique_coverage = if parsed_runs.len() >= 5 {
@@ -2564,7 +2611,7 @@ pub(crate) fn adaptive_release_operational_evidence_rows(
     } else {
         None
     };
-    let max_elapsed = |cache_hit: bool| -> Result<Option<u64>, String> {
+    let max_elapsed = |cache_hit: bool| -> Result<Option<u64>, CommandError> {
         let value = conn
             .query_row(
                 "SELECT MAX(elapsed_millis)
@@ -2581,7 +2628,7 @@ pub(crate) fn adaptive_release_operational_evidence_rows(
                 ],
                 |row| row.get::<_, Option<i64>>(0),
             )
-            .map_err(|error| format!("query adaptive run latency failed: {error}"))?;
+            .map_err(|error| ce(format!("query adaptive run latency failed: {error}")))?;
         Ok(value.and_then(|value| u64::try_from(value).ok()))
     };
     Ok((
@@ -2593,7 +2640,7 @@ pub(crate) fn adaptive_release_operational_evidence_rows(
 
 pub(crate) fn adaptive_release_operational_evidence_sync(
     app: &tauri::AppHandle,
-) -> Result<(Option<usize>, Option<u64>, Option<u64>), String> {
+) -> Result<(Option<usize>, Option<u64>, Option<u64>), CommandError> {
     adaptive_release_operational_evidence_rows(&open_adaptive_screen_db(app)?)
 }
 
@@ -2602,14 +2649,17 @@ pub(crate) fn adaptive_release_gate_store_rows(
     input: &gp_core::AdaptiveReleaseGateInput,
     report: &gp_core::AdaptiveReleaseGateReport,
     qualification: &Value,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     initialize_adaptive_exposure_db(conn)?;
     let input_json = serde_json::to_string(input)
-        .map_err(|error| format!("serialize adaptive release input failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize adaptive release input failed: {error}")))?;
     let report_json = serde_json::to_string(report)
-        .map_err(|error| format!("serialize adaptive release report failed: {error}"))?;
-    let qualification_json = serde_json::to_string(qualification)
-        .map_err(|error| format!("serialize adaptive release qualification failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize adaptive release report failed: {error}")))?;
+    let qualification_json = serde_json::to_string(qualification).map_err(|error| {
+        ce(format!(
+            "serialize adaptive release qualification failed: {error}"
+        ))
+    })?;
     conn.execute(
         "INSERT INTO adaptive_release_gate_reports_v2
            (algorithm_version, implementation_fingerprint, qualification_json, input_json, report_json, passed, updated_at)
@@ -2629,13 +2679,13 @@ pub(crate) fn adaptive_release_gate_store_rows(
             crate::market::epoch_millis().min(i64::MAX as u128) as i64
         ],
     )
-    .map_err(|error| format!("store adaptive release gate failed: {error}"))?;
+    .map_err(|error| ce(format!("store adaptive release gate failed: {error}")))?;
     Ok(())
 }
 
 pub(crate) fn adaptive_release_gate_context_rows(
     conn: &Connection,
-) -> Result<Option<(gp_core::AdaptiveReleaseGateInput, Value)>, String> {
+) -> Result<Option<(gp_core::AdaptiveReleaseGateInput, Value)>, CommandError> {
     let encoded = conn
         .query_row(
             "SELECT input_json, qualification_json
@@ -2646,13 +2696,21 @@ pub(crate) fn adaptive_release_gate_context_rows(
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
-        .map_err(|error| format!("load adaptive release gate context failed: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "load adaptive release gate context failed: {error}"
+            ))
+        })?;
     encoded
         .map(|(input_json, qualification_json)| {
             let input = serde_json::from_str::<gp_core::AdaptiveReleaseGateInput>(&input_json)
-                .map_err(|error| format!("parse adaptive release input failed: {error}"))?;
-            let qualification = serde_json::from_str::<Value>(&qualification_json)
-                .map_err(|error| format!("parse adaptive release qualification failed: {error}"))?;
+                .map_err(|error| ce(format!("parse adaptive release input failed: {error}")))?;
+            let qualification =
+                serde_json::from_str::<Value>(&qualification_json).map_err(|error| {
+                    ce(format!(
+                        "parse adaptive release qualification failed: {error}"
+                    ))
+                })?;
             Ok((input, qualification))
         })
         .transpose()
@@ -2660,7 +2718,7 @@ pub(crate) fn adaptive_release_gate_context_rows(
 
 pub(crate) fn adaptive_release_gate_recompute_operational_rows(
     conn: &Connection,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let Some((mut input, qualification)) = adaptive_release_gate_context_rows(conn)? else {
         return Ok(());
     };
@@ -2675,7 +2733,7 @@ pub(crate) fn adaptive_release_gate_recompute_operational_rows(
 #[cfg(test)]
 pub(crate) fn adaptive_release_gate_load_rows(
     conn: &Connection,
-) -> Result<Option<gp_core::AdaptiveReleaseGateReport>, String> {
+) -> Result<Option<gp_core::AdaptiveReleaseGateReport>, CommandError> {
     initialize_adaptive_exposure_db(conn)?;
     let encoded = conn
         .query_row(
@@ -2694,19 +2752,21 @@ pub(crate) fn adaptive_release_gate_load_rows(
             },
         )
         .optional()
-        .map_err(|error| format!("load adaptive release gate failed: {error}"))?;
+        .map_err(|error| ce(format!("load adaptive release gate failed: {error}")))?;
     encoded
         .map(
             |(input_json, report_json, qualification_json, stored_passed)| {
                 let input = serde_json::from_str::<gp_core::AdaptiveReleaseGateInput>(&input_json)
-                    .map_err(|error| format!("parse adaptive release input failed: {error}"))?;
+                    .map_err(|error| ce(format!("parse adaptive release input failed: {error}")))?;
                 let qualification =
                     serde_json::from_str::<Value>(&qualification_json).map_err(|error| {
                         format!("parse adaptive release qualification failed: {error}")
                     })?;
                 let mut report =
                     serde_json::from_str::<gp_core::AdaptiveReleaseGateReport>(&report_json)
-                        .map_err(|error| format!("parse adaptive release gate failed: {error}"))?;
+                        .map_err(|error| {
+                            ce(format!("parse adaptive release gate failed: {error}"))
+                        })?;
                 report.passed = report.passed
                     && stored_passed == 1
                     && input.release_configuration_qualified == Some(true)
@@ -2726,14 +2786,14 @@ pub(crate) fn adaptive_release_gate_store_sync(
     input: &gp_core::AdaptiveReleaseGateInput,
     report: &gp_core::AdaptiveReleaseGateReport,
     qualification: &Value,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     adaptive_release_gate_store_rows(&open_adaptive_screen_db(app)?, input, report, qualification)
 }
 
 #[cfg(test)]
 pub(crate) fn adaptive_release_gate_refresh_and_load_rows(
     conn: &Connection,
-) -> Result<Option<gp_core::AdaptiveReleaseGateReport>, String> {
+) -> Result<Option<gp_core::AdaptiveReleaseGateReport>, CommandError> {
     adaptive_release_gate_recompute_operational_rows(conn)?;
     adaptive_release_gate_load_rows(conn)
 }
@@ -2741,7 +2801,7 @@ pub(crate) fn adaptive_release_gate_refresh_and_load_rows(
 pub(crate) fn adaptive_exposure_recent_rows(
     conn: &Connection,
     current_trade_date: Option<&str>,
-) -> Result<Vec<gp_core::AdaptiveRecentExposure>, String> {
+) -> Result<Vec<gp_core::AdaptiveRecentExposure>, CommandError> {
     let cutoff_date = current_trade_date
         .and_then(crate::market::compact_date_key)
         .unwrap_or_else(|| "99999999".to_string());
@@ -2760,7 +2820,7 @@ pub(crate) fn adaptive_exposure_recent_rows(
               )
              ORDER BY trade_date DESC, code ASC, bucket ASC",
         )
-        .map_err(|error| format!("prepare adaptive exposure query failed: {error}"))?;
+        .map_err(|error| ce(format!("prepare adaptive exposure query failed: {error}")))?;
     let rows = statement
         .query_map(params![cutoff_date], |row| {
             Ok(gp_core::AdaptiveRecentExposure {
@@ -2769,15 +2829,15 @@ pub(crate) fn adaptive_exposure_recent_rows(
                 bucket: row.get(2)?,
             })
         })
-        .map_err(|error| format!("query adaptive exposure failed: {error}"))?;
+        .map_err(|error| ce(format!("query adaptive exposure failed: {error}")))?;
     rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("read adaptive exposure failed: {error}"))
+        .map_err(|error| ce(format!("read adaptive exposure failed: {error}")))
 }
 
 pub(crate) fn adaptive_exposure_recent_sync(
     app: &tauri::AppHandle,
     current_trade_date: Option<&str>,
-) -> Result<Vec<gp_core::AdaptiveRecentExposure>, String> {
+) -> Result<Vec<gp_core::AdaptiveRecentExposure>, CommandError> {
     adaptive_exposure_recent_rows(&open_adaptive_screen_db(app)?, current_trade_date)
 }
 
@@ -2785,7 +2845,7 @@ pub(crate) fn adaptive_exposure_record_sync(
     app: &tauri::AppHandle,
     result: &Value,
     trade_date: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let mut conn = open_adaptive_screen_db(app)?;
     adaptive_exposure_record_rows(&mut conn, result, trade_date)
 }
@@ -2794,7 +2854,7 @@ pub(crate) fn adaptive_exposure_record_rows(
     conn: &mut Connection,
     result: &Value,
     trade_date: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     initialize_adaptive_exposure_db(conn)?;
     let trade_date = crate::market::compact_date_key(trade_date)
         .ok_or_else(|| "adaptive screen trade date is invalid".to_string())?;
@@ -2831,15 +2891,17 @@ pub(crate) fn adaptive_exposure_record_rows(
                 })
         })
         .collect::<Vec<_>>();
-    let transaction = conn
-        .transaction()
-        .map_err(|error| format!("begin adaptive exposure transaction failed: {error}"))?;
+    let transaction = conn.transaction().map_err(|error| {
+        ce(format!(
+            "begin adaptive exposure transaction failed: {error}"
+        ))
+    })?;
     transaction
         .execute(
             "DELETE FROM adaptive_screen_exposure WHERE selected_at < ?1",
             params![keep_after],
         )
-        .map_err(|error| format!("prune adaptive exposure failed: {error}"))?;
+        .map_err(|error| ce(format!("prune adaptive exposure failed: {error}")))?;
     {
         let mut statement = transaction
             .prepare(
@@ -2851,14 +2913,14 @@ pub(crate) fn adaptive_exposure_record_rows(
                    algorithm_version = excluded.algorithm_version,
                    selected_at = excluded.selected_at",
             )
-            .map_err(|error| format!("prepare adaptive exposure insert failed: {error}"))?;
+            .map_err(|error| ce(format!("prepare adaptive exposure insert failed: {error}")))?;
         for (code, bucket) in selected {
             transaction
                 .execute(
                     "DELETE FROM adaptive_screen_exposure WHERE code = ?1 AND trade_date = ?2",
                     params![code, trade_date],
                 )
-                .map_err(|error| format!("deduplicate adaptive exposure failed: {error}"))?;
+                .map_err(|error| ce(format!("deduplicate adaptive exposure failed: {error}")))?;
             statement
                 .execute(params![
                     code,
@@ -2868,12 +2930,12 @@ pub(crate) fn adaptive_exposure_record_rows(
                     algorithm_version,
                     selected_at
                 ])
-                .map_err(|error| format!("insert adaptive exposure failed: {error}"))?;
+                .map_err(|error| ce(format!("insert adaptive exposure failed: {error}")))?;
         }
     }
     transaction
         .commit()
-        .map_err(|error| format!("commit adaptive exposure failed: {error}"))
+        .map_err(|error| ce(format!("commit adaptive exposure failed: {error}")))
 }
 
 #[cfg(test)]

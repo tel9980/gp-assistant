@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::screening::local_data_policy::{self as local_data, DataPolicy};
 use serde_json::{json, Value};
 use std::{
@@ -11,6 +12,11 @@ use stock_optimizer_core as gp_core;
 use crate::market::{
     EASTMONEY_DATACENTER_ENDPOINT, EASTMONEY_SECURITIES_ENDPOINT, TENCENT_BATCH_TIMEOUT_SECS,
 };
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::OBSERVE_INTERNAL, message.to_string())
+}
 
 pub(crate) const EASTMONEY_FUND_FLOW_ENDPOINT: &str =
     "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get";
@@ -44,14 +50,17 @@ pub(crate) const MIN_OBSERVE_HISTORY_BARS: usize = 3;
 pub(crate) const MIN_FULL_OBSERVE_HISTORY_BARS: usize = 750;
 
 #[tauri::command]
-pub(crate) async fn api_observe(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) async fn api_observe(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     Box::pin(api_observe_inner(app, payload)).await
 }
 
 pub(crate) async fn api_observe_inner(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let policy = DataPolicy::parse(&payload)?;
     let diagnostics_enabled = crate::perf_diagnostics::requested(&payload);
     let command_started = Instant::now();
@@ -177,7 +186,7 @@ async fn observe_from_local_cache(
     app: &tauri::AppHandle,
     payload: Value,
     diagnostics_enabled: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let cache_started = Instant::now();
     let snapshot = crate::market::cached_market_data_views(app).map_err(|error| {
         local_data::missing_error(
@@ -226,7 +235,10 @@ async fn observe_from_local_cache(
     Ok(result)
 }
 
-pub(crate) fn observe_local_metadata(core: &Value, policy: DataPolicy) -> Result<Value, String> {
+pub(crate) fn observe_local_metadata(
+    core: &Value,
+    policy: DataPolicy,
+) -> Result<Value, CommandError> {
     let request = &core["request"];
     let code = observe_request_code(request)?;
     let data = &core["data"];
@@ -250,12 +262,12 @@ pub(crate) fn observe_local_metadata(core: &Value, policy: DataPolicy) -> Result
     )
 }
 
-fn observe_request_code(request: &Value) -> Result<String, String> {
+fn observe_request_code(request: &Value) -> Result<String, CommandError> {
     request
         .get("code")
         .and_then(Value::as_str)
         .and_then(crate::market::normalize_stock_code)
-        .ok_or_else(|| "观察请求缺少有效股票代码。".to_string())
+        .ok_or_else(|| CommandError::new(codes::OBSERVE_INPUT, "观察请求缺少有效股票代码。"))
 }
 
 fn observe_cached_metadata(
@@ -263,7 +275,7 @@ fn observe_cached_metadata(
     typed: &gp_core::CoreDataSet,
     request: &Value,
     policy: DataPolicy,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let code = observe_request_code(request)?;
     observation_metadata_from_dates(
         data,
@@ -286,7 +298,7 @@ fn observation_metadata_from_dates<'a>(
     code: &str,
     policy: DataPolicy,
     dates: impl Iterator<Item = &'a str>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let stock = data
         .get("stocks")
         .and_then(Value::as_array)
@@ -357,9 +369,9 @@ async fn run_observe_calculation_with_snapshot(
     request: &Value,
     diagnostics_enabled: bool,
     cache_strategy: crate::perf_diagnostics::CacheStrategy,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let request: gp_core::StockObserveRequest = serde_json::from_value(request.clone())
-        .map_err(|error| format!("invalid observation request: {error}"))?;
+        .map_err(|error| ce(format!("invalid observation request: {error}")))?;
     let code =
         crate::market::normalize_stock_code(&request.code).unwrap_or_else(|| request.code.clone());
     let counts = observe_snapshot_counts(data.as_ref(), &code);
@@ -390,14 +402,14 @@ async fn run_observe_calculation_with_snapshot(
             crate::perf_diagnostics::Outcome::Error
         }),
     );
-    result
+    result.map_err(CommandError::from)
 }
 
 pub(crate) async fn run_observe_calculation(
     core_payload: &Value,
     diagnostics_enabled: bool,
     cache_strategy: crate::perf_diagnostics::CacheStrategy,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let calculation_started = Instant::now();
     let payload = core_payload.clone();
     let result = crate::runtime::run_cpu_bound("api_observe_calculation", move || {
@@ -424,7 +436,7 @@ pub(crate) async fn run_observe_calculation(
         crate::perf_diagnostics::Outcome::Error
     });
     crate::perf_diagnostics::record(diagnostics_enabled, event);
-    result
+    result.map_err(CommandError::from)
 }
 
 fn observe_cache_strategy(policy: DataPolicy) -> crate::perf_diagnostics::CacheStrategy {
@@ -626,7 +638,7 @@ fn financial_period_rank(period: &str) -> Option<i32> {
 pub(crate) fn parse_latest_observe_financial_snapshot(
     value: &Value,
     code: &str,
-) -> Result<serde_json::Map<String, Value>, String> {
+) -> Result<serde_json::Map<String, Value>, CommandError> {
     let normalized_code = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效财报股票代码：{code}"))?;
     let digits = normalized_code.get(..6).unwrap_or(&normalized_code);
@@ -697,7 +709,7 @@ pub(crate) async fn fetch_observe_quote_snapshot(
     code: &str,
     seed_stock: Option<serde_json::Map<String, Value>>,
     payload: &Value,
-) -> Result<serde_json::Map<String, Value>, String> {
+) -> Result<serde_json::Map<String, Value>, CommandError> {
     let client = crate::market::build_http_client_with_proxy(
         "Mozilla/5.0 GuXuanYou/0.3 observe-quote",
         Duration::from_secs(crate::market::TENCENT_REQUEST_TIMEOUT_SECS),
@@ -723,7 +735,11 @@ pub(crate) async fn fetch_observe_quote_snapshot(
             });
             code_matches && has_exact_shares
         })
-        .ok_or_else(|| format!("Tencent quote did not return exact share data for {code}"))
+        .ok_or_else(|| {
+            ce(format!(
+                "Tencent quote did not return exact share data for {code}"
+            ))
+        })
 }
 
 pub(crate) fn parse_goodwill_to_net_assets(value: &Value) -> Option<f64> {
@@ -790,7 +806,7 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
     code: &str,
     price: Option<f64>,
     payload: &Value,
-) -> Result<(serde_json::Map<String, Value>, Vec<String>), String> {
+) -> Result<(serde_json::Map<String, Value>, Vec<String>), CommandError> {
     let digits = code
         .get(..6)
         .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
@@ -916,11 +932,11 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
         Err(error) => notes.push(error.to_string()),
     }
     if fields.is_empty() {
-        return Err(if notes.is_empty() {
+        return Err(ce(if notes.is_empty() {
             "Eastmoney fundamentals returned no usable metrics".to_string()
         } else {
             notes.join(" | ")
-        });
+        }));
     }
     Ok((fields, notes))
 }
@@ -1111,14 +1127,14 @@ pub(crate) fn merge_observe_financial_snapshot(
 pub(crate) async fn observe_core_payload_with_cached_history(
     app: &tauri::AppHandle,
     payload: Value,
-) -> Result<(Value, Vec<String>), String> {
+) -> Result<(Value, Vec<String>), CommandError> {
     let diagnostics_enabled = crate::perf_diagnostics::requested(&payload);
     let cache_prepare_started = Instant::now();
     let code = payload
         .get("code")
         .and_then(Value::as_str)
         .and_then(crate::market::normalize_stock_code)
-        .ok_or_else(|| "观察请求缺少有效股票代码。".to_string())?;
+        .ok_or_else(|| CommandError::new(codes::OBSERVE_INPUT, "观察请求缺少有效股票代码。"))?;
     let snapshot = crate::market::cached_market_data_views(app)?;
     let mut data = observe_data_for_code(snapshot.data.as_ref(), &code);
     let start_date = payload
@@ -1884,7 +1900,7 @@ pub(crate) async fn fetch_eastmoney_main_fund_flow(
     client: &reqwest::Client,
     code: &str,
     end_date: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let normalized = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效资金流股票代码：{code}"))?;
     let digits = normalized
@@ -1923,7 +1939,7 @@ pub(crate) fn parse_eastmoney_main_fund_flow_item(
     text: &str,
     _code: &str,
     end_date: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let rows = value
         .get("data")
@@ -2079,7 +2095,7 @@ pub(crate) fn eastmoney_fund_flow_unavailable_item(
 pub(crate) async fn fetch_eastmoney_guba_sentiment(
     client: &reqwest::Client,
     code: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let normalized = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效股吧股票代码：{code}"))?;
     let digits = normalized
@@ -2208,7 +2224,7 @@ pub(crate) async fn fetch_eastmoney_institution_lhb(
     code: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let normalized = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效龙虎榜股票代码：{code}"))?;
     let digits = normalized
@@ -2306,7 +2322,7 @@ pub(crate) fn parse_eastmoney_lhb_item(
     code: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let rows = value
         .get("result")
@@ -2413,7 +2429,7 @@ pub(crate) async fn fetch_eastmoney_lhb_seat_side(
     code: &str,
     trade_date: &str,
     buy_side: bool,
-) -> Result<Vec<EastmoneyLhbSeatRow>, String> {
+) -> Result<Vec<EastmoneyLhbSeatRow>, CommandError> {
     let report_name = if buy_side {
         "RPT_BILLBOARD_DAILYDETAILSBUY"
     } else {
@@ -2451,7 +2467,7 @@ pub(crate) fn parse_eastmoney_lhb_seat_side(
     text: &str,
     code: &str,
     buy_side: bool,
-) -> Result<Vec<EastmoneyLhbSeatRow>, String> {
+) -> Result<Vec<EastmoneyLhbSeatRow>, CommandError> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let rows = value
         .get("result")
@@ -2662,7 +2678,7 @@ pub(crate) fn eastmoney_lhb_no_hit_item(code: &str, start_date: &str, end_date: 
 pub(crate) fn parse_eastmoney_market_active_brokerage_board(
     value: &Value,
     checked_on: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let rows = crate::market::eastmoney_result_rows(value);
     let latest_date = rows
         .iter()
@@ -2750,7 +2766,7 @@ pub(crate) fn parse_eastmoney_institutional_holdings(
     value: &Value,
     code: &str,
     checked_on: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let normalized_code = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效机构持仓股票代码：{code}"))?;
     let digits = normalized_code.get(..6).unwrap_or(&normalized_code);
@@ -2866,7 +2882,7 @@ pub(crate) async fn fetch_eastmoney_market_active_brokerage_board(
     client: &reqwest::Client,
     direct_client: &reqwest::Client,
     checked_on: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let url = reqwest::Url::parse_with_params(
         EASTMONEY_DATACENTER_ENDPOINT,
         &[
@@ -2900,7 +2916,7 @@ pub(crate) async fn fetch_eastmoney_institutional_holdings(
     direct_client: &reqwest::Client,
     code: &str,
     checked_on: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let normalized = crate::market::normalize_stock_code(code)
         .ok_or_else(|| format!("无效机构持仓股票代码：{code}"))?;
     let digits = normalized.get(..6).unwrap_or(&normalized);

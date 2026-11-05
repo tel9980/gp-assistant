@@ -45,6 +45,18 @@ pub mod codes {
     pub const EVOLUTION_SCHEMA: &str = "evolution.schema";
     pub const EVOLUTION_INPUT: &str = "evolution.input";
     pub const EVOLUTION_INTERNAL: &str = "evolution.internal";
+
+    /// 后台任务调度（jobs）。
+    pub const JOBS_IO: &str = "jobs.io";
+    pub const JOBS_INPUT: &str = "jobs.input";
+    pub const JOBS_INTERNAL: &str = "jobs.internal";
+    /// 选股/回测/筛选（screening）。
+    pub const SCREENING_IO: &str = "screening.io";
+    pub const SCREENING_INPUT: &str = "screening.input";
+    pub const SCREENING_INTERNAL: &str = "screening.internal";
+    /// 观察页（observe）。
+    pub const OBSERVE_INPUT: &str = "observe.input";
+    pub const OBSERVE_INTERNAL: &str = "observe.internal";
     pub const MARKET_IO: &str = "market.io";
     pub const MARKET_NETWORK: &str = "market.network";
     pub const MARKET_PROVIDER: &str = "market.provider";
@@ -105,6 +117,20 @@ impl CommandError {
 /// 迁移期不少代码把错误当字符串用（`err.to_ascii_lowercase()`、传 `&str` 参数、
 /// `err.contains("...")` 断言）。Deref 到 `str` 让这些用法继续成立，
 /// 同时不改变序列化契约（前端仍拿到 `{ code, message, ... }`）。
+#[cfg(test)]
+impl PartialEq<&str> for CommandError {
+    fn eq(&self, other: &&str) -> bool {
+        self.message == *other
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<CommandError> for &str {
+    fn eq(&self, other: &CommandError) -> bool {
+        other.message == *self
+    }
+}
+
 impl std::ops::Deref for CommandError {
     type Target = str;
 
