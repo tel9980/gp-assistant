@@ -53,15 +53,27 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install NDK and platform
+      # android-actions/setup-android@v3 在这个 runner 上会让自带的 sdkmanager 以
+      # 「Computing updates...」失败退出（exit 1），所以改成手工装 cmdline-tools：
+      # 路径自己定、版本自己钉，出问题好复现。
+      - name: Install Android SDK
         shell: pwsh
         run: |
-          sdkmanager --install "ndk;$env:NDK_VERSION" "platforms;$env:ANDROID_PLATFORM" "build-tools;34.0.0"
-          $sdk = $env:ANDROID_SDK_ROOT
-          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
-          # Tauri 的 Android 构建链从 ANDROID_NDK_HOME / NDK_HOME 找工具链。
+          $sdk = "$env:RUNNER_TEMP\android-sdk"
+          $url = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+          New-Item -ItemType Directory -Force -Path $sdk | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\cmdline-tools.zip"
+          Expand-Archive "$env:RUNNER_TEMP\cmdline-tools.zip" -DestinationPath "$env:RUNNER_TEMP\cmdline-tools" -Force
+          New-Item -ItemType Directory -Force -Path "$sdk\cmdline-tools" | Out-Null
+          Move-Item "$env:RUNNER_TEMP\cmdline-tools\cmdline-tools" "$sdk\cmdline-tools\latest"
+          "ANDROID_HOME=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ANDROID_SDK_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:ANDROID_HOME = $sdk
+          $env:ANDROID_SDK_ROOT = $sdk
+          $sdkmanager = "$sdk\cmdline-tools\latest\bin\sdkmanager.bat"
+          # 许可证必须逐个喂 y；非交互环境里 `--licenses` 会一直等输入。
+          1..30 | ForEach-Object { "y" } | & $sdkmanager --sdk_root="$sdk" --licenses | Out-Null
+          & $sdkmanager --sdk_root="$sdk" "platform-tools" "platforms;$env:ANDROID_PLATFORM" "build-tools;34.0.0" "ndk;$env:NDK_VERSION"
           "ANDROID_NDK_HOME=$sdk\ndk\$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "NDK_HOME=$sdk\ndk\$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
