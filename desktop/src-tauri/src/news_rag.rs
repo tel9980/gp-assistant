@@ -1835,7 +1835,6 @@ fn import_news_cache(
             ))
         },
     )
-    .map_err(CommandError::from)
 }
 
 fn news_items_to_external_records(items: Vec<Value>) -> Vec<crate::external_data::StoredRecord> {

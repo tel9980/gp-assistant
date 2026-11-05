@@ -1,6 +1,12 @@
+use crate::error::{codes, CommandError};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use stock_optimizer_core::{RateRatio, RateUnit, METRIC_CONTRACT_VERSION};
+
+/// 本模块的错误统一从这里出（迁移期兜底码 METRIC_UNITS_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::METRIC_UNITS_INTERNAL, message.to_string())
+}
 
 fn stock_units() -> BTreeMap<String, RateUnit> {
     [
@@ -43,22 +49,24 @@ fn declared_units(
     value: Option<&Value>,
     targets: &BTreeMap<String, RateUnit>,
     known_contract: bool,
-) -> Result<BTreeMap<String, RateUnit>, String> {
+) -> Result<BTreeMap<String, RateUnit>, CommandError> {
     match value {
         Some(Value::Object(values)) => values
             .iter()
             .map(|(key, unit)| {
                 if !targets.contains_key(key) {
-                    return Err(format!("未知财务指标单位：{key}"));
+                    return Err(ce(format!("未知财务指标单位：{key}")));
                 }
                 let unit = serde_json::from_value::<RateUnit>(unit.clone())
-                    .map_err(|_| format!("指标 {key} 的单位无效"))?;
+                    .map_err(|_| ce(format!("指标 {key} 的单位无效")))?;
                 Ok((key.clone(), unit))
             })
             .collect(),
-        Some(_) => Err("指标单位声明必须是对象".to_string()),
+        Some(_) => Err(ce("指标单位声明必须是对象")),
         None if known_contract => Ok(targets.clone()),
-        None => Err("财务来源缺少明确单位，请提供 metric_units 或已知 v3 快照版本".to_string()),
+        None => Err(ce(
+            "财务来源缺少明确单位，请提供 metric_units 或已知 v3 快照版本",
+        )),
     }
 }
 
@@ -66,7 +74,7 @@ fn convert_row(
     row: &mut Map<String, Value>,
     sources: &BTreeMap<String, RateUnit>,
     targets: &BTreeMap<String, RateUnit>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     for (key, target) in targets {
         let Some(value) = row.get(key) else {
             continue;
@@ -108,7 +116,7 @@ fn normalize_rows(
     value: &mut Value,
     sources: &BTreeMap<String, RateUnit>,
     targets: &BTreeMap<String, RateUnit>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     match value {
         Value::Array(rows) => {
             for row in rows {
@@ -117,7 +125,7 @@ fn normalize_rows(
         }
         Value::Object(row) => convert_row(row, sources, targets)?,
         Value::Null => (),
-        _ => return Err("财务或股票记录必须是对象".to_string()),
+        _ => return Err(ce("财务或股票记录必须是对象")),
     }
     Ok(())
 }
@@ -146,7 +154,7 @@ fn has_rate_values(snapshot: &Value, targets: &BTreeMap<String, RateUnit>) -> bo
         })
 }
 
-pub(crate) fn normalize_financial_snapshot(snapshot: &Value) -> Result<Value, String> {
+pub(crate) fn normalize_financial_snapshot(snapshot: &Value) -> Result<Value, CommandError> {
     let targets = financial_units();
     let known = snapshot.get("schema_version").and_then(Value::as_str)
         == Some("mobile-financial-snapshot/v3")
@@ -155,11 +163,11 @@ pub(crate) fn normalize_financial_snapshot(snapshot: &Value) -> Result<Value, St
     let mut output = snapshot.clone();
     let object = output
         .as_object_mut()
-        .ok_or_else(|| "财务快照必须是对象".to_string())?;
+        .ok_or_else(|| ce("财务快照必须是对象"))?;
     if let Some(financials) = object.get_mut("financials") {
         let financials = financials
             .as_object_mut()
-            .ok_or_else(|| "financials 必须是对象".to_string())?;
+            .ok_or_else(|| ce("financials 必须是对象"))?;
         for row in financials.values_mut() {
             normalize_rows(row, &sources, &targets)?;
         }
@@ -179,7 +187,7 @@ pub(crate) fn normalize_financial_snapshot(snapshot: &Value) -> Result<Value, St
         for stock in stocks {
             let row = stock
                 .as_object_mut()
-                .ok_or_else(|| "股票快照记录必须是对象".to_string())?;
+                .ok_or_else(|| ce("股票快照记录必须是对象"))?;
             let nested = row.get("financial").and_then(Value::as_object).cloned();
             let mut financial = nested.clone().unwrap_or_else(|| row.clone());
             convert_row(
@@ -216,13 +224,13 @@ pub(crate) fn normalize_financial_snapshot(snapshot: &Value) -> Result<Value, St
     Ok(output)
 }
 
-pub(crate) fn normalize_stock_dataset(dataset: &Value) -> Result<Value, String> {
+pub(crate) fn normalize_stock_dataset(dataset: &Value) -> Result<Value, CommandError> {
     let targets = stock_units();
     let sources = declared_units(dataset.get("metric_units"), &targets, true)?;
     let mut output = dataset.clone();
     let object = output
         .as_object_mut()
-        .ok_or_else(|| "股票数据集必须是对象".to_string())?;
+        .ok_or_else(|| ce("股票数据集必须是对象"))?;
     if let Some(stocks) = object.get_mut("stocks") {
         normalize_rows(stocks, &sources, &targets)?;
     }

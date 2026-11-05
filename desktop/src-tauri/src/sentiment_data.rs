@@ -1,7 +1,13 @@
+use crate::error::{codes, CommandError};
 use reqwest::Url;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// 本模块的错误统一从这里出（迁移期兜底码 SENTIMENT_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::SENTIMENT_INTERNAL, message.to_string())
+}
 
 const DAY: i64 = 86_400_000;
 const CST: i64 = 28_800_000;
@@ -246,7 +252,7 @@ pub(crate) fn build_snapshot(
     documents: Vec<Value>,
     data: Value,
     requested_industry: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if window_days != 30 {
         return Err("sentiment snapshots require 30 natural days".into());
     }

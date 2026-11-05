@@ -1,8 +1,14 @@
 use super::{DataDomain, DataStore, Market, StoredRecord};
+use crate::error::{codes, CommandError};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::Path};
+
+/// 本模块的错误统一从这里出（迁移期兜底码 EXTERNAL_DATA_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::EXTERNAL_DATA_INTERNAL, message.to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct LegacyImportReport {
@@ -29,7 +35,7 @@ pub(crate) fn import_legacy_json_domains<F>(
     source_path: &Path,
     domains: &[(DataDomain, Market)],
     normalize: F,
-) -> Result<LegacyJsonImportBatch, String>
+) -> Result<LegacyJsonImportBatch, CommandError>
 where
     F: FnOnce(
         &Value,
@@ -37,8 +43,12 @@ where
         &str,
     ) -> Result<HashMap<(DataDomain, Market), Vec<StoredRecord>>, String>,
 {
-    let source_bytes = std::fs::read(source_path)
-        .map_err(|error| format!("read legacy cache {}: {error}", source_path.display()))?;
+    let source_bytes = std::fs::read(source_path).map_err(|error| {
+        ce(format!(
+            "read legacy cache {}: {error}",
+            source_path.display()
+        ))
+    })?;
     let checksum = sha256_hex(&source_bytes);
     let source_path_text = source_path.to_string_lossy().into_owned();
     let mut reports = Vec::with_capacity(domains.len());
@@ -149,7 +159,7 @@ pub(crate) fn import_legacy_json<F>(
     domain: DataDomain,
     market: Market,
     normalize: F,
-) -> Result<LegacyImportReport, String>
+) -> Result<LegacyImportReport, CommandError>
 where
     F: FnOnce(Value, &str, &str) -> Result<Vec<StoredRecord>, String>,
 {
@@ -166,7 +176,7 @@ where
         .reports
         .into_iter()
         .next()
-        .ok_or_else(|| "legacy import returned no domain report".to_string())
+        .ok_or_else(|| ce("legacy import returned no domain report"))
 }
 
 fn import_legacy_records(
@@ -176,7 +186,7 @@ fn import_legacy_records(
     source_path: &str,
     checksum: &str,
     records: &[StoredRecord],
-) -> Result<LegacyImportReport, String> {
+) -> Result<LegacyImportReport, CommandError> {
     if records
         .iter()
         .any(|record| record.domain != domain || record.market != market)
@@ -288,7 +298,7 @@ fn record_failure(
     checksum: &str,
     parsed_count: usize,
     error: &str,
-) -> Result<LegacyImportReport, String> {
+) -> Result<LegacyImportReport, CommandError> {
     let error = truncate_utf8(error, 2 * 1024);
     store.record_legacy_import(
         domain,
@@ -314,7 +324,7 @@ fn record_failure(
     })
 }
 
-fn canonical_record_set(records: &[StoredRecord]) -> Result<Vec<(String, String)>, String> {
+fn canonical_record_set(records: &[StoredRecord]) -> Result<Vec<(String, String)>, CommandError> {
     let mut canonical = records
         .iter()
         .map(|record| {
@@ -327,10 +337,10 @@ fn canonical_record_set(records: &[StoredRecord]) -> Result<Vec<(String, String)
                 record.metadata.source_id,
             );
             let payload = serde_json::to_vec(&record.payload)
-                .map_err(|error| format!("encode legacy record for parity check: {error}"))?;
+                .map_err(|error| ce(format!("encode legacy record for parity check: {error}")))?;
             Ok((key, sha256_hex(&payload)))
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, CommandError>>()?;
     canonical.sort();
     Ok(canonical)
 }

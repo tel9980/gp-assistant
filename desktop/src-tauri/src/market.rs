@@ -726,8 +726,7 @@ pub(crate) async fn core_validate_data_source(payload: Value) -> Result<Value, C
     let validated = crate::runtime::run_cpu_bound("core_validate_data_source", move || {
         gp_core::validate_data_source_value(payload).map_err(|error| error.to_string())
     })
-    .await
-    .map_err(CommandError::from)?;
+    .await?;
     validated.map_err(CommandError::from)
 }
 
@@ -5788,7 +5787,7 @@ pub(crate) fn write_mobile_market_data_once(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), CommandError> {
-    crate::durability::atomic_write_json(path, bytes).map_err(CommandError::from)
+    crate::durability::atomic_write_json(path, bytes)
 }
 
 pub(crate) fn market_quote_coverage(

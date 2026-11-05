@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::market_domain::{
     CapabilityFreshness, CapabilityId, CapabilitySourceEvidence, CapabilityStatus, CoverageSummary,
     MarketCapability, MarketId,
@@ -5,6 +6,11 @@ use crate::market_domain::{
 use serde_json::Value;
 use stock_optimizer_core as gp_core;
 use tauri::AppHandle;
+
+/// 本模块的错误统一从这里出（迁移期兜底码 MARKET_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::MARKET_INTERNAL, message.to_string())
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CapabilityEvidence {
@@ -743,7 +749,7 @@ pub(crate) fn cn_evidence_from_cache(
     output
 }
 
-fn cn_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, String> {
+fn cn_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, CommandError> {
     let status = crate::market::market_data_status(app)?;
     let data = crate::market::cached_market_data_snapshot(app)
         .map(|snapshot| snapshot.as_ref().clone())
@@ -752,7 +758,7 @@ fn cn_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, String> {
     Ok(cn_evidence_from_cache(&status, &data, &external_status))
 }
 
-fn hk_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, String> {
+fn hk_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, CommandError> {
     let path = crate::hk_market::hk_market_data_path(app)?;
     let cache = crate::hk_market::read_hk_market_cache(&path)?;
     let expected = cache.securities.len() as u64;
@@ -945,7 +951,7 @@ fn hk_evidence(app: &AppHandle) -> Result<Vec<CapabilityEvidence>, String> {
 pub(crate) fn collect_market_capability_evidence(
     app: &AppHandle,
     market: MarketId,
-) -> Result<Vec<CapabilityEvidence>, String> {
+) -> Result<Vec<CapabilityEvidence>, CommandError> {
     match market {
         MarketId::Cn => cn_evidence(app),
         MarketId::Hk => hk_evidence(app),
@@ -956,7 +962,7 @@ pub(crate) fn collect_market_capability_evidence(
 pub(crate) async fn api_market_capabilities(
     app: AppHandle,
     market: String,
-) -> Result<Vec<MarketCapability>, String> {
+) -> Result<Vec<MarketCapability>, CommandError> {
     let market = parse_market(&market)
         .ok_or_else(|| "unsupported market; expected one of: cn, hk".to_owned())?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -964,7 +970,7 @@ pub(crate) async fn api_market_capabilities(
         Ok(capabilities_for_market(market, &evidence))
     })
     .await
-    .map_err(|error| format!("market capability worker failed: {error}"))?
+    .map_err(|error| ce(format!("market capability worker failed: {error}")))?
 }
 
 fn parse_market(value: &str) -> Option<MarketId> {

@@ -2215,7 +2215,7 @@ fn write_hk_market_cache_legacy(path: &Path, cache: &HkMarketCache) -> Result<()
             format!("encode HK market cache failed: {error}"),
         )
     })?;
-    crate::durability::atomic_write_json(path, &bytes).map_err(CommandError::from)
+    crate::durability::atomic_write_json(path, &bytes)
 }
 
 fn external_hk_store_path(path: &Path) -> Result<PathBuf, CommandError> {
@@ -3223,9 +3223,7 @@ fn record_hk_source_result(
     error: Option<&str>,
 ) -> Result<(), CommandError> {
     if success {
-        store
-            .record_source_success(source_id, domain, market, at, 1)
-            .map_err(CommandError::from)
+        store.record_source_success(source_id, domain, market, at, 1)
     } else {
         let error = error.unwrap_or("provider request failed");
         let lower = error.to_ascii_lowercase();
@@ -3240,9 +3238,7 @@ fn record_hk_source_result(
         } else {
             "provider_error"
         };
-        store
-            .record_source_failure(source_id, domain, market, at, category, error)
-            .map_err(CommandError::from)
+        store.record_source_failure(source_id, domain, market, at, category, error)
     }
 }
 

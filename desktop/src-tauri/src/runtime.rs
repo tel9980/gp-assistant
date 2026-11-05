@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use std::{
     future::Future,
     sync::{
@@ -70,14 +71,16 @@ fn market_refresh_semaphore() -> &'static Semaphore {
 async fn acquire_permit(
     semaphore: &'static Semaphore,
     label: &str,
-) -> Result<SemaphorePermit<'static>, String> {
-    semaphore
-        .acquire()
-        .await
-        .map_err(|_| format!("{label} concurrency limiter is closed"))
+) -> Result<SemaphorePermit<'static>, CommandError> {
+    semaphore.acquire().await.map_err(|_| {
+        CommandError::new(
+            codes::RUNTIME_INTERNAL,
+            format!("{label} concurrency limiter is closed"),
+        )
+    })
 }
 
-pub(crate) async fn run_cpu_bound<F, R>(label: &'static str, task: F) -> Result<R, String>
+pub(crate) async fn run_cpu_bound<F, R>(label: &'static str, task: F) -> Result<R, CommandError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -91,10 +94,15 @@ where
         task()
     })
     .await
-    .map_err(|error| format!("{label} worker panicked or was cancelled: {error}"))
+    .map_err(|error| {
+        CommandError::new(
+            codes::RUNTIME_INTERNAL,
+            format!("{label} worker panicked or was cancelled: {error}"),
+        )
+    })
 }
 
-pub(crate) async fn run_io_bound<F, R>(label: &'static str, task: F) -> Result<R, String>
+pub(crate) async fn run_io_bound<F, R>(label: &'static str, task: F) -> Result<R, CommandError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -108,10 +116,18 @@ where
         task()
     })
     .await
-    .map_err(|error| format!("{label} worker panicked or was cancelled: {error}"))
+    .map_err(|error| {
+        CommandError::new(
+            codes::RUNTIME_INTERNAL,
+            format!("{label} worker panicked or was cancelled: {error}"),
+        )
+    })
 }
 /// Network fallbacks must not occupy the lane used to durably save drafts.
-pub(crate) async fn run_transport_bound<F, R>(label: &'static str, task: F) -> Result<R, String>
+pub(crate) async fn run_transport_bound<F, R>(
+    label: &'static str,
+    task: F,
+) -> Result<R, CommandError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -123,7 +139,10 @@ where
     )
     .await
 }
-pub(crate) async fn run_user_state_bound<F, R>(label: &'static str, task: F) -> Result<R, String>
+pub(crate) async fn run_user_state_bound<F, R>(
+    label: &'static str,
+    task: F,
+) -> Result<R, CommandError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -139,7 +158,7 @@ async fn run_dedicated_blocking<F, R>(
     lane: &'static Semaphore,
     label: &'static str,
     task: F,
-) -> Result<R, String>
+) -> Result<R, CommandError>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
@@ -152,7 +171,12 @@ where
         task()
     })
     .await
-    .map_err(|error| format!("{label} worker panicked or was cancelled: {error}"))
+    .map_err(|error| {
+        CommandError::new(
+            codes::RUNTIME_INTERNAL,
+            format!("{label} worker panicked or was cancelled: {error}"),
+        )
+    })
 }
 pub(crate) async fn with_heavy_network_permit<F, R, E>(
     label: &'static str,
@@ -164,7 +188,7 @@ where
 {
     let _permit = acquire_permit(heavy_network_semaphore(), label)
         .await
-        .map_err(E::from)?;
+        .map_err(|error| E::from(error.to_string()))?;
     future.await
 }
 
@@ -178,7 +202,7 @@ where
 {
     let _permit = acquire_permit(market_refresh_semaphore(), label)
         .await
-        .map_err(E::from)?;
+        .map_err(|error| E::from(error.to_string()))?;
     future.await
 }
 

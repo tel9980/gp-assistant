@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::{
     agent_harness,
     rig_runtime::{self, RunCancellation},
@@ -9,6 +10,11 @@ use rig_core::{
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+/// 本模块的错误统一从这里出（迁移期兜底码 SENTIMENT_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::SENTIMENT_INTERNAL, message.to_string())
+}
 
 const MAX_INPUT: usize = 2 * 1024 * 1024;
 const MAX_OUTPUT: usize = 64 * 1024;
@@ -79,26 +85,28 @@ fn validate_cited_text(
     field: &str,
     known: &std::collections::HashSet<String>,
     refs: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let text = value
         .as_str()
         .ok_or_else(|| format!("{field} must contain strings"))?;
     if text.trim().is_empty() {
-        return Err(format!("{field} must not contain empty text"));
+        return Err(ce(format!("{field} must not contain empty text")));
     }
     for id in citation_tokens(text) {
         if !known.contains(id) {
-            return Err(format!("unknown evidence id {id}"));
+            return Err(ce(format!("unknown evidence id {id}")));
         }
         push_unique(refs, id);
     }
     if citation_tokens(text).is_empty() && !non_claim_text(text) {
-        return Err(format!("{field} must contain an inline evidence citation"));
+        return Err(ce(format!(
+            "{field} must contain an inline evidence citation"
+        )));
     }
     if !has_prose_without_citations(text) {
-        return Err(format!(
+        return Err(ce(format!(
             "{field} must contain prose in addition to citations"
-        ));
+        )));
     }
     Ok(())
 }
@@ -145,7 +153,7 @@ fn split_evidence(snapshot: &Value) -> (Value, Value) {
     (json!({"evidence": facts}), json!({"evidence": discussions}))
 }
 
-fn validate(mut out: Value, snapshot: &Value) -> Result<Value, String> {
+fn validate(mut out: Value, snapshot: &Value) -> Result<Value, CommandError> {
     let obj = out
         .as_object_mut()
         .ok_or("sentiment output must be object")?;
@@ -193,7 +201,7 @@ fn validate(mut out: Value, snapshot: &Value) -> Result<Value, String> {
         }
         for f in ["support", "against", "evidence_ids", "gaps"] {
             if d.get(f).and_then(Value::as_array).is_none() {
-                return Err(format!("missing dimension field {f}"));
+                return Err(ce(format!("missing dimension field {f}")));
             }
         }
     }
@@ -218,7 +226,7 @@ fn validate(mut out: Value, snapshot: &Value) -> Result<Value, String> {
     for id in top_refs {
         let id = id.as_str().ok_or("evidence_ids must contain strings")?;
         if !known.contains(id) {
-            return Err(format!("unknown evidence id {id}"));
+            return Err(ce(format!("unknown evidence id {id}")));
         }
         push_unique(&mut refs, id);
     }
@@ -244,7 +252,7 @@ fn validate(mut out: Value, snapshot: &Value) -> Result<Value, String> {
             }
             for id in citation_tokens(text) {
                 if !known.contains(id) {
-                    return Err(format!("unknown evidence id {id}"));
+                    return Err(ce(format!("unknown evidence id {id}")));
                 }
                 push_unique(&mut refs, id);
             }
@@ -291,7 +299,7 @@ fn validate(mut out: Value, snapshot: &Value) -> Result<Value, String> {
                 .as_str()
                 .ok_or("dimension evidence_ids must contain strings")?;
             if !known.contains(id) {
-                return Err(format!("unknown evidence id {id}"));
+                return Err(ce(format!("unknown evidence id {id}")));
             }
             push_unique(&mut refs, id);
         }
@@ -379,7 +387,7 @@ async fn query_snapshot(
     cancellation: Arc<RunCancellation>,
     instructions: &str,
     question: &str,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if serde_json::to_vec(snapshot)
         .map_err(|e| e.to_string())?
         .len()
@@ -439,7 +447,7 @@ async fn query_snapshot(
         .or_else(|| raw.strip_prefix("```"))
         .unwrap_or(raw);
     serde_json::from_str(raw.trim().trim_end_matches("```").trim())
-        .map_err(|e| format!("invalid model JSON: {e}"))
+        .map_err(|e| ce(format!("invalid model JSON: {e}")))
 }
 
 pub(crate) async fn analyze<F: FnMut(Value) + Send>(
@@ -447,7 +455,7 @@ pub(crate) async fn analyze<F: FnMut(Value) + Send>(
     snapshot: Value,
     cancellation: Arc<RunCancellation>,
     mut sink: F,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     sink(json!({"type":"status","stage":"模型综合消息、量价与行业证据","progress":35}));
     let value = query_snapshot(
         &payload,
@@ -465,7 +473,7 @@ pub(crate) async fn followup(
     payload: Value,
     snapshot: Value,
     cancellation: Arc<RunCancellation>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let question = payload
         .get("question")
         .and_then(Value::as_str)
@@ -487,7 +495,7 @@ pub(crate) async fn followup(
     {
         let id = id.as_str().ok_or("evidence_ids must contain strings")?;
         if !known.contains(id) {
-            return Err(format!("unknown evidence id {id}"));
+            return Err(ce(format!("unknown evidence id {id}")));
         }
         push_unique(&mut refs, id);
     }

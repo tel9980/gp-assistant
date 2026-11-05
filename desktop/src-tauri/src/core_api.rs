@@ -10,8 +10,7 @@ where
 {
     let outcome =
         crate::runtime::run_cpu_bound(label, move || task().map_err(|error| error.to_string()))
-            .await
-            .map_err(CommandError::from)?;
+            .await?;
     outcome.map_err(CommandError::from)
 }
 

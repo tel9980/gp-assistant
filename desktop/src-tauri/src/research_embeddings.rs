@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use fastembed::{
     InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding, TokenizerFiles,
     UserDefinedEmbeddingModel,
@@ -9,6 +10,11 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
+
+/// 本模块的错误统一从这里出（迁移期兜底码 RESEARCH_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::RESEARCH_INTERNAL, message.to_string())
+}
 
 pub(crate) const MODEL_ID: &str = "BAAI/bge-small-zh-v1.5";
 pub(crate) const MODEL_DIMENSIONS: usize = 512;
@@ -69,7 +75,7 @@ pub(crate) fn model_status(model_dir: &Path) -> Value {
     }
 }
 
-pub(crate) fn embed(model_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+pub(crate) fn embed(model_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>, CommandError> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
@@ -84,14 +90,14 @@ pub(crate) fn embed(model_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>,
         .map_err(|_| "embedding model lock is poisoned".to_string())?;
     let vectors = model
         .embed(texts, Some(1))
-        .map_err(|error| format!("failed to generate local embeddings: {error}"))?;
+        .map_err(|error| ce(format!("failed to generate local embeddings: {error}")))?;
     vectors
         .into_iter()
         .map(normalize_vector)
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn initialize_runtime(model_dir: &Path) -> Result<EmbeddingRuntime, String> {
+fn initialize_runtime(model_dir: &Path) -> Result<EmbeddingRuntime, CommandError> {
     verify_model_files(model_dir)?;
     let tokenizer_files = TokenizerFiles {
         tokenizer_file: read_model_file(model_dir, "tokenizer.json")?,
@@ -111,41 +117,49 @@ fn initialize_runtime(model_dir: &Path) -> Result<EmbeddingRuntime, String> {
             .with_max_length(512)
             .with_intra_threads(EMBEDDING_INTRA_THREADS),
     )
-    .map_err(|error| format!("failed to initialize local embedding model: {error}"))?;
+    .map_err(|error| {
+        ce(format!(
+            "failed to initialize local embedding model: {error}"
+        ))
+    })?;
     Ok(EmbeddingRuntime {
         model_dir: model_dir.to_path_buf(),
         model: Mutex::new(model),
     })
 }
 
-fn verify_model_files(model_dir: &Path) -> Result<u64, String> {
+fn verify_model_files(model_dir: &Path) -> Result<u64, CommandError> {
     let mut total_bytes = 0u64;
     for (name, expected_hash) in MODEL_FILES {
         let path = model_dir.join(name);
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("missing embedding model file {}: {error}", path.display()))?;
+        let bytes = fs::read(&path).map_err(|error| {
+            ce(format!(
+                "missing embedding model file {}: {error}",
+                path.display()
+            ))
+        })?;
         let actual_hash = sha256_hex(&bytes);
         if actual_hash != expected_hash {
-            return Err(format!(
+            return Err(ce(format!(
                 "embedding model checksum mismatch for {name}: expected {expected_hash}, got {actual_hash}"
-            ));
+            )));
         }
         total_bytes = total_bytes.saturating_add(bytes.len() as u64);
     }
     Ok(total_bytes)
 }
 
-fn read_model_file(model_dir: &Path, name: &str) -> Result<Vec<u8>, String> {
+fn read_model_file(model_dir: &Path, name: &str) -> Result<Vec<u8>, CommandError> {
     let path = model_dir.join(name);
-    fs::read(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))
+    fs::read(&path).map_err(|error| ce(format!("failed to read {}: {error}", path.display())))
 }
 
-fn normalize_vector(mut vector: Vec<f32>) -> Result<Vec<f32>, String> {
+fn normalize_vector(mut vector: Vec<f32>) -> Result<Vec<f32>, CommandError> {
     if vector.len() != MODEL_DIMENSIONS {
-        return Err(format!(
+        return Err(ce(format!(
             "embedding dimension mismatch: expected {MODEL_DIMENSIONS}, got {}",
             vector.len()
-        ));
+        )));
     }
     let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     if !norm.is_finite() || norm <= f32::EPSILON {

@@ -17,6 +17,8 @@ export function localDataUnavailable(status: DataStatus | null | undefined): boo
 }
 
 export function shouldSuggestLocalRefresh(error: unknown): boolean {
+  // 结构化错误（CommandError）直接看 code；旧式错误回落到解析 message 里的 JSON。
+  if (toAppError(error).code === "LOCAL_DATA_MISSING") return true;
   const seen = new Set<unknown>();
   let current: unknown = error;
   for (let depth = 0; depth < 4 && current != null; depth += 1) {

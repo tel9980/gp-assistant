@@ -54,6 +54,9 @@ pub mod codes {
     pub const AGENT_LEDGER_SQLITE: &str = "agent_ledger.sqlite";
     pub const AGENT_LEDGER_INTERNAL: &str = "agent_ledger.internal";
     pub const EXTERNAL_STORE_INTERNAL: &str = "external_store.internal";
+    /// 舆情/情绪域（sentiment 家族）。
+    pub const SENTIMENT_INPUT: &str = "sentiment.input";
+    pub const SENTIMENT_INTERNAL: &str = "sentiment.internal";
     pub const GEPA_LAB_INTERNAL: &str = "gepa_lab.internal";
     pub const PROMPT_UPGRADE_INTERNAL: &str = "prompt_upgrade.internal";
     pub const RESEARCH_RECOVERY_INTERNAL: &str = "research_recovery.internal";
@@ -84,6 +87,23 @@ pub mod codes {
     pub const MARKET_PROVIDER: &str = "market.provider";
     pub const MARKET_INPUT: &str = "market.input";
     pub const MARKET_INTERNAL: &str = "market.internal";
+    /// 运行时基础设施（并发闸门 / 阻塞线程池）。
+    pub const RUNTIME_INTERNAL: &str = "runtime.internal";
+    /// 壳层自身（lib.rs 里的 api_health / open_external_url）。
+    pub const CORE_INPUT: &str = "core.input";
+    pub const CORE_INTERNAL: &str = "core.internal";
+    /// 度量单位与数值规整（metric_units）。
+    pub const METRIC_UNITS_INPUT: &str = "metric_units.input";
+    pub const METRIC_UNITS_INTERNAL: &str = "metric_units.internal";
+    /// 本地数据策略（local_data_policy）。
+    pub const LOCAL_DATA_POLICY_INPUT: &str = "local_data_policy.input";
+    pub const LOCAL_DATA_POLICY_INTERNAL: &str = "local_data_policy.internal";
+    /// 前端按这三个码做提示分支，**值必须保持大写原样**。
+    pub const LOCAL_DATA_MISSING: &str = "LOCAL_DATA_MISSING";
+    pub const LOCAL_DATA_POLICY_INVALID: &str = "INVALID_DATA_POLICY";
+    pub const LOCAL_DATA_POLICY_REFRESH_REQUIRED: &str = "REFRESH_REQUIRED";
+    /// 模型接入（llm）。
+    pub const LLM_INTERNAL: &str = "llm.internal";
     pub const WATCHLIST_CONFLICT: &str = "WATCHLIST_CONFLICT";
     pub const WATCHLIST_OPERATION_REUSED: &str = "WATCHLIST_OPERATION_REUSED";
 }

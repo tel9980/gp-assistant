@@ -115,6 +115,7 @@ async fn freeze(app: AppHandle, payload: Value) -> Result<Value, String> {
                 data,
                 payload.get("industry").and_then(Value::as_str),
             )
+            .map_err(String::from)
         })
     })
     .await?
@@ -159,7 +160,7 @@ pub(crate) async fn api_sentiment_start(app: AppHandle, payload: Value) -> Resul
             let snapshot=freeze(app.clone(),payload.clone()).await?;
             let mut analysis=sentiment_agent::analyze(payload.clone(),snapshot.clone(),cancellation.clone(),|event| {
                 if let Ok(mut state)=runs().lock() {if let Some(run)=state.get_mut(&task_id) {if run["status"]=="running" {run["stage"]=event.get("stage").cloned().unwrap_or(json!("分析中"));run["progress"]=event.get("progress").cloned().unwrap_or(json!(50));}}}
-            }).await?;
+            }).await.map_err(String::from)?;
             if cancellation.is_cancelled() {return Err("已取消分析".to_string());}
             analysis["analysis_id"]=json!(task_id); analysis["run_id"]=json!(task_id);
             analysis["snapshot_id"]=snapshot["snapshot_id"].clone(); analysis["stock_code"]=json!(stock);
@@ -366,7 +367,9 @@ pub(crate) async fn api_sentiment_followup(
     .await??;
     let run_id = id();
     let cancel = rig_runtime::register_run(&run_id);
-    let output = sentiment_agent::followup(payload.clone(), snapshot, cancel).await;
+    let output = sentiment_agent::followup(payload.clone(), snapshot, cancel)
+        .await
+        .map_err(String::from);
     rig_runtime::unregister_run(&run_id);
     let mut result = agent_harness::redact_persisted_response(&output?, payload.get("llm"));
     result["analysis_id"] = json!(analysis_id);

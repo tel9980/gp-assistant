@@ -1,10 +1,16 @@
 use crate::credentials;
+use crate::error::{codes, CommandError};
 
 use futures::stream::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{collections::HashSet, time::Duration};
 use zeroize::Zeroizing;
+
+/// 本模块的错误统一从这里出（迁移期兜底码 LLM_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::LLM_INTERNAL, message.to_string())
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LlmDiagnosticError {
@@ -358,25 +364,27 @@ pub(crate) fn llm_inference_endpoint(
     base_url: &str,
     api_format: &str,
     full_url: bool,
-) -> Result<reqwest::Url, String> {
-    let mut url = reqwest::Url::parse(base_url.trim())
-        .map_err(|_| "供应商接口地址格式不正确。".to_string())?;
+) -> Result<reqwest::Url, CommandError> {
+    let mut url =
+        reqwest::Url::parse(base_url.trim()).map_err(|_| ce("供应商接口地址格式不正确。"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err("供应商接口地址仅支持有效的 http 或 https 地址。".to_string());
+        return Err(ce("供应商接口地址仅支持有效的 http 或 https 地址。"));
     }
     if url.scheme() == "http" && !llm_plain_http_host_allowed(url.host_str()) {
-        return Err("公网模型接口必须使用 HTTPS；HTTP 仅允许本机或私有局域网地址。".to_string());
+        return Err(ce(
+            "公网模型接口必须使用 HTTPS；HTTP 仅允许本机或私有局域网地址。",
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("供应商接口地址不能包含用户名或密码。".to_string());
+        return Err(ce("供应商接口地址不能包含用户名或密码。"));
     }
     if full_url {
         if api_format == "anthropic_messages" {
             if url.query().is_some() || url.fragment().is_some() {
-                return Err("Anthropic 完整 URL 不能包含查询参数或片段。".to_string());
+                return Err(ce("Anthropic 完整 URL 不能包含查询参数或片段。"));
             }
             if !url.path().trim_end_matches('/').ends_with("/v1/messages") {
-                return Err("Anthropic 完整 URL 必须以 /v1/messages 结尾。".to_string());
+                return Err(ce("Anthropic 完整 URL 必须以 /v1/messages 结尾。"));
             }
         }
         return Ok(url);
@@ -483,20 +491,22 @@ pub(crate) fn llm_connection_http_error(status: u16, body: &[u8], api_key: &str)
 pub(crate) fn llm_models_endpoint(
     base_url: &str,
     api_format: &str,
-) -> Result<reqwest::Url, String> {
-    let mut url = reqwest::Url::parse(base_url.trim())
-        .map_err(|_| "供应商接口地址格式不正确。".to_string())?;
+) -> Result<reqwest::Url, CommandError> {
+    let mut url =
+        reqwest::Url::parse(base_url.trim()).map_err(|_| ce("供应商接口地址格式不正确。"))?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("供应商接口地址仅支持 http 或 https。".to_string());
+        return Err(ce("供应商接口地址仅支持 http 或 https。"));
     }
     if url.host_str().is_none() {
-        return Err("供应商接口地址缺少主机名。".to_string());
+        return Err(ce("供应商接口地址缺少主机名。"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("供应商接口地址不能包含用户名或密码。".to_string());
+        return Err(ce("供应商接口地址不能包含用户名或密码。"));
     }
     if url.scheme() == "http" && !llm_plain_http_host_allowed(url.host_str()) {
-        return Err("公网模型接口必须使用 HTTPS；HTTP 仅允许本机或私有局域网地址。".to_string());
+        return Err(ce(
+            "公网模型接口必须使用 HTTPS；HTTP 仅允许本机或私有局域网地址。",
+        ));
     }
 
     if is_official_deepseek_anthropic_base_url(&url, api_format) {

@@ -7,6 +7,7 @@ mod jobs;
 mod perf_diagnostics;
 mod user_backup;
 mod workspace;
+use crate::error::{codes, CommandError};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
@@ -60,10 +61,10 @@ fn api_app_confirm_close(app: AppHandle, saved: bool) {
 pub mod eval_replay;
 
 #[tauri::command]
-fn api_health() -> Result<Value, String> {
+fn api_health() -> Result<Value, CommandError> {
     let warnings = STARTUP_WARNINGS
         .lock()
-        .map_err(|_| "startup status unavailable")?
+        .map_err(|_| CommandError::new(codes::CORE_INTERNAL, "startup status unavailable"))?
         .clone();
     Ok(
         json!({"status": if warnings.is_empty() { "ok" } else { "degraded" }, "runtime": "tauri", "warnings": warnings}),
@@ -72,15 +73,19 @@ fn api_health() -> Result<Value, String> {
 
 #[tauri::command]
 #[allow(deprecated)]
-fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
+fn open_external_url(app: AppHandle, url: String) -> Result<(), CommandError> {
     let trimmed = url.trim();
-    let parsed = reqwest::Url::parse(trimmed).map_err(|_| "来源链接格式不正确".to_string())?;
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|_| CommandError::new(codes::CORE_INPUT, "来源链接格式不正确"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err("只允许打开 http/https 来源链接".to_string());
+        return Err(CommandError::new(
+            codes::CORE_INPUT,
+            "只允许打开 http/https 来源链接",
+        ));
     }
     app.shell()
         .open(parsed.as_str().to_string(), None)
-        .map_err(|error| error.to_string())
+        .map_err(|error| CommandError::new(codes::CORE_INTERNAL, error.to_string()))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

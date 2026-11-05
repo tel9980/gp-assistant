@@ -382,7 +382,7 @@ async fn run_observe_calculation_with_snapshot(
         serde_json::to_value(result).map_err(|error| error.to_string())
     })
     .await
-    .and_then(|result| result);
+    .and_then(|result| result.map_err(CommandError::from));
     crate::perf_diagnostics::record(
         diagnostics_enabled,
         crate::perf_diagnostics::PerfEvent::new(
@@ -402,7 +402,7 @@ async fn run_observe_calculation_with_snapshot(
             crate::perf_diagnostics::Outcome::Error
         }),
     );
-    result.map_err(CommandError::from)
+    result
 }
 
 pub(crate) async fn run_observe_calculation(
@@ -416,7 +416,7 @@ pub(crate) async fn run_observe_calculation(
         gp_core::observe_with_data_value(payload).map_err(|error| error.to_string())
     })
     .await
-    .and_then(|result| result);
+    .and_then(|result| result.map_err(CommandError::from));
     let elapsed = calculation_started.elapsed();
     let counts = observe_data_counts(core_payload);
     let event = crate::perf_diagnostics::PerfEvent::new(
@@ -436,7 +436,7 @@ pub(crate) async fn run_observe_calculation(
         crate::perf_diagnostics::Outcome::Error
     });
     crate::perf_diagnostics::record(diagnostics_enabled, event);
-    result.map_err(CommandError::from)
+    result
 }
 
 fn observe_cache_strategy(policy: DataPolicy) -> crate::perf_diagnostics::CacheStrategy {
@@ -3187,10 +3187,10 @@ mod local_first_observe_tests {
     #[test]
     fn observe_missing_quote_or_history_is_not_a_result() {
         let core = json!({"request":{"code":"000001.SZ"},"data":{"stocks":[],"histories":{}}});
-        let error: Value = serde_json::from_str(
-            &observe_local_metadata(&core, DataPolicy::CacheOnly).unwrap_err(),
-        )
-        .unwrap();
+        let error: Value =
+            serde_json::to_value(observe_local_metadata(&core, DataPolicy::CacheOnly).unwrap_err())
+                .unwrap();
+        let error = error["details"].clone();
         assert_eq!(error["missing_count"], 2);
         assert_eq!(
             error["missing"][1]["required_bars"],
@@ -3204,10 +3204,10 @@ mod local_first_observe_tests {
         assert_eq!(metadata["history_as_of"], "20200103");
         assert_eq!(metadata["optional_data"]["financials"], false);
         core["request"]["series_limit"] = json!(10000);
-        let error: Value = serde_json::from_str(
-            &observe_local_metadata(&core, DataPolicy::CacheOnly).unwrap_err(),
-        )
-        .unwrap();
+        let error: Value =
+            serde_json::to_value(observe_local_metadata(&core, DataPolicy::CacheOnly).unwrap_err())
+                .unwrap();
+        let error = error["details"].clone();
         assert_eq!(
             error["missing"][0]["required_bars"],
             MIN_FULL_OBSERVE_HISTORY_BARS
@@ -3333,7 +3333,8 @@ mod observation_snapshot_tests {
         let error =
             observe_cached_metadata(&data, typed.as_ref(), &request(), DataPolicy::CacheOnly)
                 .unwrap_err();
-        let error: Value = serde_json::from_str(&error).unwrap();
+        let error: Value = serde_json::to_value(error).unwrap();
+        let error = error["details"].clone();
         assert_eq!(error["missing_count"], 1);
         assert_eq!(error["missing"][0]["required_bars"], 750);
         assert_eq!(error["missing"][0]["available_bars"], 749);

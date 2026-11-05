@@ -35,14 +35,11 @@ pub(crate) fn local_snapshot(
         )
     })?;
     if data.stocks.is_empty() {
-        return Err(CommandError::new(
-            codes::SCREENING_IO,
-            local_data::missing_error(
-                operation,
-                &[
-                    json!({"kind":"stock_universe", "reason":"No persisted market stocks. Refresh the market universe explicitly."}),
-                ],
-            ),
+        return Err(local_data::missing_error(
+            operation,
+            &[
+                json!({"kind":"stock_universe", "reason":"No persisted market stocks. Refresh the market universe explicitly."}),
+            ],
         ));
     }
     if !data
@@ -50,14 +47,11 @@ pub(crate) fn local_snapshot(
         .iter()
         .any(|stock| stock.price.is_finite() && stock.price > 0.0)
     {
-        return Err(CommandError::new(
-            codes::SCREENING_IO,
-            local_data::missing_error(
-                operation,
-                &[
-                    json!({"kind":"quotes", "reason":"No usable cached stock prices; refresh market quotes explicitly."}),
-                ],
-            ),
+        return Err(local_data::missing_error(
+            operation,
+            &[
+                json!({"kind":"quotes", "reason":"No usable cached stock prices; refresh market quotes explicitly."}),
+            ],
         ));
     }
     Ok(data)
@@ -429,7 +423,7 @@ pub(crate) async fn api_adaptive_screen(
         serde_json::to_value(result).map_err(|error| error.to_string())
     })
     .await
-    .and_then(|result| result);
+    .and_then(|result| result.map_err(CommandError::from));
     let calculation_elapsed = calculation_started.elapsed();
     let calculation_event = crate::perf_diagnostics::PerfEvent::new(
         crate::perf_diagnostics::Flow::Screening,
@@ -3079,10 +3073,11 @@ mod local_first_tests {
             "20201231",
             45,
         );
-        let error: Value = serde_json::from_str(
-            &local_data::require_coverage("trend_screen", &coverage).unwrap_err(),
+        let error: Value = serde_json::to_value(
+            local_data::require_coverage("trend_screen", &coverage).unwrap_err(),
         )
         .unwrap();
+        let error = error["details"].clone();
         assert_eq!(error["missing"][0]["code"], "000001.SZ");
         assert_eq!(error["missing"][0]["available_bars"], 0);
         assert_eq!(error["missing"][0]["required_bars"], 45);

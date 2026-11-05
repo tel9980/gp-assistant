@@ -1,5 +1,11 @@
 //! Local-first request policy and pure coverage checks. No I/O or network.
+use crate::error::{codes, CommandError};
 use serde_json::{json, Value};
+
+/// 本模块的错误统一从这里出（迁移期兜底码 LOCAL_DATA_POLICY_INTERNAL）。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::LOCAL_DATA_POLICY_INTERNAL, message.to_string())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DataPolicy {
@@ -7,12 +13,17 @@ pub(crate) enum DataPolicy {
     Refresh,
 }
 impl DataPolicy {
-    pub(crate) fn parse(payload: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(payload: &Value) -> Result<Self, CommandError> {
         let policy = match payload.get("data_policy") {
             None => Self::CacheOnly,
             Some(Value::String(value)) if value == "cache_only" => Self::CacheOnly,
             Some(Value::String(value)) if value == "refresh" => Self::Refresh,
-            _ => return Err(json!({"code":"INVALID_DATA_POLICY","message":"data_policy must be cache_only or refresh"}).to_string()),
+            _ => {
+                return Err(CommandError::new(
+                    codes::LOCAL_DATA_POLICY_INVALID,
+                    "data_policy must be cache_only or refresh",
+                ))
+            }
         };
         if payload
             .get("internal_release_validation_cold_start")
@@ -20,7 +31,11 @@ impl DataPolicy {
             == Some(true)
             && policy != Self::Refresh
         {
-            return Err(json!({"code":"REFRESH_REQUIRED","message":"release validation cold-start requires explicit data_policy=refresh","action":"refresh"}).to_string());
+            return Err(CommandError::new(
+                codes::LOCAL_DATA_POLICY_REFRESH_REQUIRED,
+                "release validation cold-start requires explicit data_policy=refresh",
+            )
+            .with_details(json!({ "action": "refresh" })));
         }
         Ok(policy)
     }
@@ -41,12 +56,18 @@ pub(crate) fn core_payload(mut payload: Value) -> Value {
     payload
 }
 
-pub(crate) fn missing_error(operation: &str, missing: &[Value]) -> String {
-    json!({"code":"LOCAL_DATA_MISSING", "operation":operation, "missing_count":missing.len(),
-        "missing":missing.iter().take(20).collect::<Vec<_>>(), "truncated":missing.len() > 20,
-        "message":"Required local data is missing; no substitute algorithm was used.",
-        "action":"refresh"})
-    .to_string()
+pub(crate) fn missing_error(operation: &str, missing: &[Value]) -> CommandError {
+    CommandError::new(
+        codes::LOCAL_DATA_MISSING,
+        "Required local data is missing; no substitute algorithm was used.",
+    )
+    .with_details(json!({
+        "operation": operation,
+        "missing_count": missing.len(),
+        "missing": missing.iter().take(20).collect::<Vec<_>>(),
+        "truncated": missing.len() > 20,
+        "action": "refresh",
+    }))
 }
 
 // Input dates have already passed the market/core parser. Ignore malformed dates defensively.
@@ -72,7 +93,7 @@ pub(crate) fn history_coverage<'a>(
         "available_bars":dates.len(), "first_date":dates.first(), "as_of":dates.last(), "sufficient":dates.len() >= required})
 }
 
-pub(crate) fn require_coverage(operation: &str, coverage: &[Value]) -> Result<(), String> {
+pub(crate) fn require_coverage(operation: &str, coverage: &[Value]) -> Result<(), CommandError> {
     let missing: Vec<_> = coverage
         .iter()
         .filter(|item| item.get("sufficient").and_then(Value::as_bool) != Some(true))
@@ -142,9 +163,9 @@ mod tests {
         let missing = (0..100)
             .map(|i| json!({"kind":"history","code":i.to_string()}))
             .collect::<Vec<_>>();
-        let error: serde_json::Value =
-            serde_json::from_str(&missing_error("screen", &missing)).unwrap();
-        assert_eq!(error["code"], "LOCAL_DATA_MISSING");
+        let serialized = serde_json::to_value(missing_error("screen", &missing)).unwrap();
+        assert_eq!(serialized["code"], "LOCAL_DATA_MISSING");
+        let error = serialized["details"].clone();
         assert_eq!(error["missing_count"], 100);
         assert_eq!(error["missing"].as_array().unwrap().len(), 20);
         assert_eq!(error["action"], "refresh");

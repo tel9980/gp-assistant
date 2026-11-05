@@ -5828,7 +5828,7 @@ pub(crate) fn schedule_research_embeddings(app: tauri::AppHandle) {
                 .and_then(|result| result.map_err(String::from));
             let event = match result {
                 Ok(status) => json!({"ok": true, "status": status}),
-                Err(error) => json!({"ok": false, "error": error}),
+                Err(error) => json!({"ok": false, "error": error.to_string()}),
             };
             let _ = app.emit("research-embedding-status", event);
             if !RESEARCH_EMBEDDING_JOB_GATE.finish_cycle() {
@@ -5903,10 +5903,10 @@ pub(crate) fn schedule_research_maintenance(app: tauri::AppHandle) {
                 })
             })
             .await
-            .and_then(|result| result);
+            .and_then(|result| result.map_err(CommandError::from));
             let event = match result {
                 Ok(status) => json!({"ok": true, "status": status}),
-                Err(error) => json!({"ok": false, "error": error}),
+                Err(error) => json!({"ok": false, "error": error.to_string()}),
             };
             let _ = app.emit("research-retention-status", event);
             tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
