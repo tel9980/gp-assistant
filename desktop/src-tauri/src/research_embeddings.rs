@@ -48,7 +48,7 @@ struct EmbeddingRuntime {
     model: Mutex<TextEmbedding>,
 }
 
-static EMBEDDING_RUNTIME: OnceLock<Result<EmbeddingRuntime, String>> = OnceLock::new();
+static EMBEDDING_RUNTIME: OnceLock<Result<EmbeddingRuntime, CommandError>> = OnceLock::new();
 
 pub(crate) fn model_status(model_dir: &Path) -> Value {
     match verify_model_files(model_dir) {

@@ -130,3 +130,18 @@ cargo clippy --all-targets --features gepa-lab -- -D clippy::result_large_err
 剩余历史警告（不计入门禁，2026-11-05 统计）：`desktop/src-tauri` 全量 clippy 约 81 条，主要是
 `dead_code`、`too_many_arguments`、`type_complexity`、`field_reassign_with_default` 等既有风格问题；
 `native/gp-core` 已清零并用 `-D warnings` 阻断。
+
+### 迁移盲区：只在 Windows 编译的代码
+
+`desktop/src-tauri/src/lib.rs` 里 `#[cfg(target_os = "windows")] mod research_embeddings;`
+说明**有些文件在 Linux 上根本不参与编译**（`fastembed` 也是 Windows-only 依赖）：
+
+- 本地 `cargo check --all-targets` 全绿 ≠ 这些文件是对的。实测把 `fn __probe_bad() -> u8 { "x" }`
+  追加到该文件末尾，Linux 编译照样通过。
+- 迁移这类文件时要**手工逐个核对**：函数签名、`Err("...".to_string())`、`.map_err(|_| "...".to_string())`、
+  `Value::String(error)`，以及**`static`/`const` 上的类型标注**（例如
+  `static EMBEDDING_RUNTIME: OnceLock<Result<EmbeddingRuntime, CommandError>>`，改成 String 就会在
+  CI 的 Windows runner 上炸）。
+- 只能靠 CI 的 `Deterministic RAG and Agent gates`（windows-2025）验证，一次 push 一轮。
+- 同理：`cargo clippy --fix` 会按 Linux 视角删掉「只在 `#[cfg(windows)]` 用」的 import
+  （`use std::process::Command;`），删完 Windows 就断——这类 import 要显式加 `#[cfg(windows)]`。
