@@ -5,10 +5,13 @@ const { existsSync, readFileSync } = await import(nodeFs);
 
 const researchCss = readFileSync(new URL("../styles/research.css", import.meta.url), "utf8");
 const sentimentCss = readFileSync(new URL("../styles/sentiment.css", import.meta.url), "utf8");
-const newsPanel = readFileSync(
-  new URL("../components/panels/NewsRagPanel.tsx", import.meta.url),
-  "utf8",
-);
+// NewsRagPanel.tsx 已按域拆成三个文件（面板 / 子组件 / 纯逻辑），
+// 契约断言检查的是「渲染结果涉及的源码」，因此把三份拼起来一起看。
+const newsPanel = [
+  "../components/panels/NewsRagPanel.tsx",
+  "../components/panels/newsRagSections.tsx",
+  "../components/panels/newsRagModel.ts",
+].map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8")).join("\n");
 const screenshotHarness = readFileSync(
   new URL("../../../../scripts/ui-screenshot.mjs", import.meta.url),
   "utf8",

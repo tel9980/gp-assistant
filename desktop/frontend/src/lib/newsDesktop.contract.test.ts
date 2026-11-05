@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 const nodeFs = "node:fs";
 const { readFileSync } = await import(nodeFs);
 const css = readFileSync(new URL("../styles/research.css", import.meta.url), "utf8");
-const panel = readFileSync(new URL("../components/panels/NewsRagPanel.tsx", import.meta.url), "utf8");
+// NewsRagPanel.tsx 已按域拆分，契约断言把「面板 + 子组件 + 纯逻辑」三份源码一起看。
+const panel = [
+  "../components/panels/NewsRagPanel.tsx",
+  "../components/panels/newsRagSections.tsx",
+  "../components/panels/newsRagModel.ts",
+].map((rel) => readFileSync(new URL(rel, import.meta.url), "utf8")).join("\n");
 function lastRule(selector: string) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const rules = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g"))];
