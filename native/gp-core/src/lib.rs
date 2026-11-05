@@ -1,3 +1,29 @@
+mod adaptive_screen;
+mod backtest;
+mod industry_rank;
+mod rates;
+#[cfg(test)]
+mod scoring_contract_tests;
+mod scoring_parameters;
+mod source_fingerprint;
+mod volatility;
+pub use backtest::*;
+mod observation;
+pub use observation::*;
+mod agent;
+pub use agent::*;
+mod scoring;
+pub use scoring::*;
+mod sector;
+pub use sector::*;
+mod trend;
+pub use trend::*;
+mod dataset;
+pub use dataset::*;
+mod ffi;
+#[cfg(test)]
+mod tests;
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fmt,
@@ -9,29 +35,21 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod adaptive_screen;
-mod rates;
-mod scoring_parameters;
-mod source_fingerprint;
-pub use scoring_parameters::{
-    adaptive_score_factor_vector, fixed_scoring_parameters, scoring_implementation_fingerprint,
-    validate_scoring_parameters, ModeParameters, ScoringParameters, METRIC_CONTRACT_VERSION,
-    SCORING_REVISION,
-};
-pub use source_fingerprint::source_text_fingerprint;
-mod industry_rank;
-#[cfg(test)]
-mod scoring_contract_tests;
-use industry_rank::industry_rank_values;
-use rates::{percentage_points, ratio_percentage_points};
-pub use rates::{RateRatio, RateUnit};
-mod volatility;
 pub use adaptive_screen::{
     adaptive_candidate_codes, adaptive_scoring_features, adaptive_screen_stocks,
     adaptive_screen_stocks_with_parameters, AdaptiveFeatureRow, AdaptiveFeatureSet,
     AdaptiveMarketRegime, AdaptiveRecentExposure, AdaptiveScreenRequest, AdaptiveScreenResult,
     MIN_MARKET_BREADTH_COVERAGE,
 };
+pub(crate) use industry_rank::industry_rank_values;
+use rates::{percentage_points, ratio_percentage_points};
+pub use rates::{RateRatio, RateUnit};
+pub use scoring_parameters::{
+    adaptive_score_factor_vector, fixed_scoring_parameters, scoring_implementation_fingerprint,
+    validate_scoring_parameters, ModeParameters, ScoringParameters, METRIC_CONTRACT_VERSION,
+    SCORING_REVISION,
+};
+pub use source_fingerprint::source_text_fingerprint;
 pub use volatility::{
     AtrSnapshot, BollingerBandsSnapshot, ChaikinVolatilitySnapshot, DonchianChannelSnapshot,
     IndicatorUnavailable, KeltnerChannelSnapshot, RviSnapshot, VolatilitySnapshot,
@@ -2000,9 +2018,6 @@ pub fn graph_screen_with_source(
     Ok(graph_screen_stocks(universe, relations, request))
 }
 
-mod backtest;
-pub use backtest::*;
-
 pub fn trend_with_mock(request: &TrendIndicatorRequest) -> CoreResult<TrendIndicatorResult> {
     trend_with_source(&MockDataSource, request)
 }
@@ -2115,9 +2130,6 @@ pub fn observe_with_source(
         notes,
     })
 }
-
-mod observation;
-pub use observation::*;
 
 fn score_sentiment(score: f64) -> &'static str {
     if score >= 60.0 {
@@ -2282,9 +2294,6 @@ fn trend_history_behind_quote(
         _ => false,
     }
 }
-
-mod agent;
-pub use agent::*;
 
 fn mode_reply(mode: Option<&str>, text: &str) -> String {
     match mode.unwrap_or("research") {
@@ -3537,12 +3546,6 @@ const COLD_SECTOR_KEYWORDS: [&str; 9] = [
     "\u{516c}\u{8def}",
 ];
 
-mod scoring;
-pub use scoring::*;
-
-mod sector;
-pub use sector::*;
-
 fn append_selected(
     selected: &mut Vec<ScreenedStock>,
     used_codes: &mut HashSet<String>,
@@ -3564,12 +3567,6 @@ fn sort_value(item: &ScreenedStock, sort_by: &str) -> Option<f64> {
     };
     value.filter(|value| value.is_finite())
 }
-
-mod trend;
-pub use trend::*;
-
-mod dataset;
-pub use dataset::*;
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles
@@ -3618,8 +3615,3 @@ fn finite_round4(value: f64) -> Option<f64> {
         None
     }
 }
-
-mod ffi;
-
-#[cfg(test)]
-mod tests;
