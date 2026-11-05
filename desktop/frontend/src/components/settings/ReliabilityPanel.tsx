@@ -1,5 +1,9 @@
-import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useId, useRef, useState } from 'react';
+import { invalidateQuery, mutateTauri, queryTauri } from '../../lib/query';
+
+/** 诊断状态只在切回设置页时重复读，短缓存即可；写操作后主动失效。 */
+const DIAGNOSTICS_STATUS_KEY = 'api_diagnostics_status';
+const DIAGNOSTICS_STATUS_TTL_MS = 5_000;
 
 const EVENTS = ['started', 'clean_shutdown', 'previous_unclean_exit', 'storage_check_failed', 'storage_recovery_completed', 'offline_operation_completed', 'task_completed', 'task_failed', 'task_cancelled', 'background_request', 'gepa_setting_changed', 'gepa_blocked'] as const;
 type OperationalEvent = typeof EVENTS[number];
@@ -55,7 +59,8 @@ export function ReliabilityPanel({ onGepaPreferenceChange }: { onGepaPreferenceC
   const inFlight=useRef(false);
   useEffect(() => {
     let active=true;
-    void invoke('api_diagnostics_status').then(raw => { if (active) setSettings(parseSettings(raw)); })
+    void queryTauri('api_diagnostics_status', undefined, { ttlMs: DIAGNOSTICS_STATUS_TTL_MS })
+      .then(raw => { if (active) setSettings(parseSettings(raw)); })
       .catch(() => { if (active) setMessage('本地可靠性控制不可用，请检查启动状态。'); });
     return () => { active=false; };
   }, []);
@@ -95,7 +100,8 @@ export function ReliabilityPanel({ onGepaPreferenceChange }: { onGepaPreferenceC
           aria-checked={settings?.gepa_requested_enabled ?? false} disabled={busy || !settings || !settings.gepa_compiled}
           onClick={() => run(async () => {
             if (!settings) return;
-            setSettings(parseSettings(await invoke('api_diagnostics_set_gepa',{payload:{enabled:!settings.gepa_requested_enabled}})));
+            setSettings(parseSettings(await mutateTauri('api_diagnostics_set_gepa',{payload:{enabled:!settings.gepa_requested_enabled}})));
+            invalidateQuery(DIAGNOSTICS_STATUS_KEY);
             onGepaPreferenceChange?.();
           })}><span aria-hidden="true" /></button>
         </div>
@@ -109,7 +115,7 @@ export function ReliabilityPanel({ onGepaPreferenceChange }: { onGepaPreferenceC
       <section className="reliability-task-group" aria-labelledby={`${headingId}-diagnostics`}>
         <h4 id={`${headingId}-diagnostics`}>诊断导出</h4>
         <button type="button" className="clear-btn" aria-label="预览本地诊断" disabled={busy || !settings}
-          onClick={() => run(async () => { const next=parsePreview(await invoke('api_diagnostics_preview')); setPreview(next); setSettings(next.settings); })}>预览本地诊断</button>
+          onClick={() => run(async () => { const next=parsePreview(await mutateTauri('api_diagnostics_preview')); setPreview(next); setSettings(next.settings); })}>预览本地诊断</button>
         {preview ? <>
           <p>{preview.previous_exit === 'unclean' ? '上次未正常退出：不等于已验证崩溃，也可能是强制停止或断电。' : preview.previous_exit === 'clean' ? '上次已记录正常退出。' : '尚无上次退出记录。'}</p>
           <pre className="reliability-preview" aria-label="诊断导出预览">{JSON.stringify(preview,null,2)}</pre>

@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const ipc = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ipc);
+import { resetQueryCacheForTests } from '../../lib/query';
 import { ReliabilityPanel } from './ReliabilityPanel';
 const settings = { gepa_requested_enabled: false, gepa_effective_enabled: false, gepa_compiled: true, safe_start: false };
 const snapshot = { schema_version: 1, previous_exit: 'unclean', settings, events: ['started', 'previous_unclean_exit'], counters: { started: 1, previous_unclean_exit: 1 }, dropped_events: 0 };
@@ -13,6 +14,9 @@ async function mount() { await act(async () => { renderer = create(<ReliabilityP
 async function preview() { await act(async () => find('预览本地诊断').props.onClick()); }
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true); vi.clearAllMocks(); downloaded = undefined;
+  // 面板现在走 lib/tauri 门面（会先判断运行时），测试里给一个最小的 Tauri 运行时标记。
+  vi.stubGlobal('window', { __TAURI_INTERNALS__: {} });
+  resetQueryCacheForTests();
   ipc.invoke.mockImplementation(async (name: string) => {
     if (name === 'api_diagnostics_status') return settings;
     if (name === 'api_diagnostics_preview') return snapshot;

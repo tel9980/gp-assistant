@@ -145,3 +145,32 @@ cargo clippy --all-targets --features gepa-lab -- -D clippy::result_large_err
 - 只能靠 CI 的 `Deterministic RAG and Agent gates`（windows-2025）验证，一次 push 一轮。
 - 同理：`cargo clippy --fix` 会按 Linux 视角删掉「只在 `#[cfg(windows)]` 用」的 import
   （`use std::process::Command;`），删完 Windows 就断——这类 import 要显式加 `#[cfg(windows)]`。
+
+## 前端统一查询层（`desktop/frontend/src/lib/query.ts`）
+
+Rust 侧统一了错误类型，前端也需要一处统一的取数入口，否则每个面板各写一遍
+「拿 invoke、判运行时、catch、拼提示」。
+
+```ts
+import { queryTauri, mutateTauri, invalidateQuery } from "../lib/query";
+
+const status = await queryTauri<Diagnostics>("api_diagnostics_status", undefined, { ttlMs: 5_000 });
+await mutateTauri("api_diagnostics_set_gepa", { payload: { enabled: true } });
+invalidateQuery("api_diagnostics_status");
+```
+
+三个函数的分工：
+
+- `queryTauri<T>(command, args?, { ttlMs, force, signal })` — 读。**同参数并发调用合并成一次 IPC**；
+  `ttlMs > 0` 时按 key 缓存，`force` 跳过读缓存但仍回写；失败一律 `toAppError` 归一化，
+  且**失败不进缓存**。
+- `mutateTauri<T>(command, args?)` — 写。不走缓存、不合并并发；同样要求运行时可用并归一化错误。
+  写完自行 `invalidateQuery(...)`。
+- `invalidateQuery(match?)` — 按命令名/前缀失效，不传则全清。`resetQueryCacheForTests()`
+  给测试用。
+
+缓存键是「命令名 + 键排序后的稳定 JSON」，即 `{a:1,b:2}` 与 `{b:2,a:1}` 命中同一个 key。
+走的是 `lib/tauri` 门面的 `getTauriInvoke`，所以 `vi.mock("../../lib/tauri")` 的既有测试照旧生效，
+浏览器环境没有 Tauri 时得到 `app.unknown` 而不是 `TypeError`。
+
+刻意不做的：全局状态容器、自动重试、请求编排、写操作缓存。缓存写操作只会制造难查的 bug。

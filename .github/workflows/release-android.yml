@@ -1,0 +1,112 @@
+name: Android APK
+
+# 只用 workflow_dispatch：Android 打包耗时长（首次 20+ 分钟），且不属于日常门禁。
+# 宿主刻意选 windows-latest —— 现有的资源准备脚本 scripts/prepare-tauri-android-assets.ps1
+# 里固定调 `npm.cmd` 并写 Windows 风格路径，在 ubuntu 上跑不了；换宿主比改写脚本风险小。
+# 默认产出 **debug APK**（免签名、可直接侧载）；release APK 需要 keystore，见 docs/ci-release.md。
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "构建 debug APK（免签名，可直接安装）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Build APK (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      NDK_VERSION: 27.0.12077973
+      ANDROID_PLATFORM: android-34
+      NDK_HOME: ${{ github.workspace }}\android-ndk
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            desktop/frontend/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and platform
+        shell: pwsh
+        run: |
+          sdkmanager --install "ndk;$env:NDK_VERSION" "platforms;$env:ANDROID_PLATFORM" "build-tools;34.0.0"
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          # Tauri 的 Android 构建链从 ANDROID_NDK_HOME / NDK_HOME 找工具链。
+          "ANDROID_NDK_HOME=$sdk\ndk\$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NDK_HOME=$sdk\ndk\$env:NDK_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm --prefix desktop ci
+          npm --prefix desktop/frontend ci
+
+      - name: Initialise Android project
+        shell: pwsh
+        working-directory: desktop
+        run: npm run android:init
+
+      - name: Prepare Android assets (icons / manifest / frontend bundle)
+        shell: pwsh
+        working-directory: desktop
+        run: npm run prepare:android
+
+      - name: Build APK
+        shell: pwsh
+        working-directory: desktop
+        run: |
+          if ("${{ inputs.debug }}" -eq "true") {
+            npx tauri android build --apk --debug --target aarch64 --ci --features gepa-lab
+          } else {
+            npx tauri android build --apk --target aarch64 --ci --features gepa-lab
+          }
+
+      - name: Locate APK
+        id: apk
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path desktop/src-tauri/gen/android/app/build/outputs/apk -Recurse -Filter *.apk
+          if (-not $files) { throw "No APK produced" }
+          $files | ForEach-Object { "found: $($_.FullName) ($([math]::Round($_.Length / 1MB, 1)) MB)" }
+          $main = $files | Sort-Object Length -Descending | Select-Object -First 1
+          $target = "dist/guxuanyou_android_arm64.apk"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $main.FullName $target
+          "path=$target" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guxuanyou-android-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14

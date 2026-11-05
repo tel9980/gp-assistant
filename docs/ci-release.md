@@ -51,3 +51,40 @@ Actions → **Release Windows installer** → Run workflow。可填 `tag`，留�
 
 vitest 支持按 glob 设 threshold，已验证会真正执行（把某条调到 99% 会报
 `ERROR: Coverage for statements ... does not meet "src/lib/**/*.{ts,tsx}" threshold`）。
+
+## Android APK（`.github/workflows/release-android.yml`）
+
+只支持手动触发（`workflow_dispatch`），不属于日常门禁：首次构建 20+ 分钟，之后靠
+rust-cache 约 10 分钟。产物上传为构建工件 `guxuanyou-android-apk`（保留 14 天）。
+
+宿主刻意选 **windows-latest**：`scripts/prepare-tauri-android-assets.ps1` 里固定调用
+`npm.cmd` 并写 Windows 风格路径，换到 ubuntu 需要重写 961 行脚本，风险大于收益。
+
+流程：`actions/setup-java`（temurin 17）→ `android-actions/setup-android` →
+`sdkmanager` 装 `ndk;27.0.12077973` + `platforms;android-34` + `build-tools;34.0.0`
+（NDK 路径写进 `ANDROID_NDK_HOME`/`NDK_HOME`）→ `rustup target add aarch64-linux-android` →
+`npm run android:init`（生成 `src-tauri/gen/android`）→ `npm run prepare:android`
+（图标/清单/前端 bundle）→ `tauri android build --apk --debug --target aarch64 --ci --features gepa-lab`。
+
+默认出 **debug APK**（免签名，可直接侧载安装）。要出 release APK 需要 keystore：
+把 `inputs.debug` 设成 false，并在仓库 Secrets 里配好签名参数（见下节）。
+
+## 代码签名（尚未启用）
+
+现状：Windows 安装包、免安装包、Android APK **都没有签名**。Windows 首启会出现
+SmartScreen「未知发布者」，Android 侧载会提示「来源未知」。这不是遗漏，而是缺证书。
+
+拿到证书后要改三处：
+
+1. **Windows Authenticode**（EV/OV 证书 + `signtool`）—— 在 `release-windows.yml`
+   的 `Build NSIS installer` 之后、上传之前加签名步骤，签 `setup.exe`、`guxuanyou.exe`、
+   `stock-optimizer-desktop.exe`。证书以 base64 放 Secret（`WINDOWS_CERT_PFX`），
+   密码放 `WINDOWS_CERT_PASSWORD`，导入到临时证书存储后 `signtool sign /fd sha256 /tr <时间戳服务器>`。
+2. **Tauri 内置签名**（可选，用于 updater）—— `tauri.conf.json` 的
+   `plugins.updater.pubkey` + 环境变量 `TAURI_SIGNING_PRIVATE_KEY`。
+3. **Android keystore** —— `keytool -genkeypair` 生成 `.jks`，base64 存 Secret；
+   构建时写 `gen/android/keystore.properties`，`build.gradle.kts` 里读 `storeFile`/
+   `storePassword`/`keyAlias`/`keyPassword`。**keystore 一旦丢失就无法给已安装用户升级**，
+   必须离线备份。
+
+在没有证书之前，发布说明里明确写「未签名」是当前唯一诚实做法。
