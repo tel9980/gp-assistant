@@ -311,7 +311,9 @@ pub(crate) async fn api_data_refresh(
         object.insert("request_id".into(), Value::String(request_id));
         object.insert("data_policy".into(), Value::String("refresh".into()));
     }
-    crate::market::api_market_refresh(app, refresh_payload).await
+    crate::market::api_market_refresh(app, refresh_payload)
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]

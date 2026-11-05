@@ -154,25 +154,31 @@ where
     .await
     .map_err(|error| format!("{label} worker panicked or was cancelled: {error}"))
 }
-pub(crate) async fn with_heavy_network_permit<F, R>(
+pub(crate) async fn with_heavy_network_permit<F, R, E>(
     label: &'static str,
     future: F,
-) -> Result<R, String>
+) -> Result<R, E>
 where
-    F: Future<Output = Result<R, String>>,
+    F: Future<Output = Result<R, E>>,
+    E: From<String>,
 {
-    let _permit = acquire_permit(heavy_network_semaphore(), label).await?;
+    let _permit = acquire_permit(heavy_network_semaphore(), label)
+        .await
+        .map_err(E::from)?;
     future.await
 }
 
-pub(crate) async fn with_market_refresh_permit<F, R>(
+pub(crate) async fn with_market_refresh_permit<F, R, E>(
     label: &'static str,
     future: F,
-) -> Result<R, String>
+) -> Result<R, E>
 where
-    F: Future<Output = Result<R, String>>,
+    F: Future<Output = Result<R, E>>,
+    E: From<String>,
 {
-    let _permit = acquire_permit(market_refresh_semaphore(), label).await?;
+    let _permit = acquire_permit(market_refresh_semaphore(), label)
+        .await
+        .map_err(E::from)?;
     future.await
 }
 

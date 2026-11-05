@@ -3046,7 +3046,10 @@ pub(crate) async fn api_hk_financial_refresh(
             fetch_hk_fx_rate(&client, &fetched_at),
             fetch_hk_disclosure_metadata(&client, &code, &fetched_at),
         ),
-        Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
+        Err(error) => {
+            let message = String::from(error);
+            (Err(message.clone()), Err(message.clone()), Err(message))
+        }
     };
     {
         let store = crate::external_data::open_app_store(&app)?;

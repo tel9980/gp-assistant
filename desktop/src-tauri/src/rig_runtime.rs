@@ -630,7 +630,7 @@ pub(crate) fn build_model_with_payload(
         std::time::Duration::from_secs(config.timeout_seconds),
         (!network_payload.is_null()).then_some(network_payload),
     )
-    .map_err(RigAgentError::InvalidRequest)?;
+    .map_err(|error| RigAgentError::InvalidRequest(String::from(error)))?;
     let base_url = if config.endpoint_mode == "full_url"
         && matches!(
             config.kind,
@@ -2915,7 +2915,7 @@ pub(crate) async fn api_agent_stream(
             )
             .await
         }
-        Err(error) => Err(error),
+        Err(error) => Err(String::from(error)),
     };
     let completed_at_epoch_ms = crate::agent_ledger::current_epoch_millis();
     let captured_events = events.lock().map(|items| items.clone()).unwrap_or_default();

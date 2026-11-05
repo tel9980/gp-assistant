@@ -31,6 +31,8 @@ watchlist sqlite: disk I/O error
 | `CommandError` → `String` | `impl From<CommandError> for String` | 新函数被旧调用方 `?`/`map_err` 消费，行为与改造前一致 |
 | 前端任意形态 → `AppError` | `desktop/frontend/src/lib/appError.ts` 的 `toAppError` | 字符串、JSON 字符串、`Error`、结构化对象都能归一化 |
 
+`CommandError` 还实现了 `Deref<Target = str>`（视图即 `message`），迁移期 `err.to_ascii_lowercase()`、`err.contains("...")`、把 `&err` 传给 `&str` 参数都继续可用；但**新代码请用 `code()` / `errorMessage()`**。
+
 前端不要直接 `String(error)`（结构化错误会变成 `[object Object]`），用：
 
 ```ts
@@ -45,6 +47,7 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 | 模块 | 错误码 | 备注 |
 | --- | --- | --- |
 | `desktop/src-tauri/src/watchlist.rs` | `watchlist.io` / `watchlist.sqlite` / `watchlist.schema` / `watchlist.input` / `watchlist.internal`，冲突与重放沿用 `WATCHLIST_CONFLICT` / `WATCHLIST_OPERATION_REUSED` | 自选股 SQLite 全链路；冲突另带 `details.revision` |
+| `desktop/src-tauri/src/market.rs`（含 `observe.rs`、`screening.rs`、`jobs.rs`、`hk_market.rs`、`rig_runtime.rs`、`external_data/mod.rs` 接缝） | `market.network` / `market.provider` / `market.io` / `market.input` / `market.internal` | 行情域 72 处签名；`ce()` 按消息关键词分类到 network/provider/io/input，其余落 internal。**这是被最多模块共享的域**：`with_market_refresh_permit` / `with_heavy_network_permit` 改成泛型 `E: From<String>`，`screening.rs` 在闭包内 `.map_err(String::from)` 回到 String |
 | `desktop/src-tauri/src/research.rs`（含 `research_recovery.rs`、`jobs.rs`、`sentiment.rs` 的接缝） | `research.io` / `research.sqlite` / `research.input` / `research.not_found` / `research.index_stale` / `research.pack_invalid` / `research.internal` | 研究库 90 处签名；`research.not_found` 已接到 `NewsRagPanel`：会话不存在时从列表摘掉并提示，而不是让用户反复点「重试加载会话」 |
 
 冲突码保留大写形式，因为前端 `watchlistStore` 早已按这两个字符串判定；改名收益为零、风险不小。

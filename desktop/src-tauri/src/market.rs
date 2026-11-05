@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use base64::{engine::general_purpose, Engine as _};
 use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
@@ -176,27 +177,42 @@ pub(crate) struct ScreenStockOverlayCacheEntry {
     pub(crate) stocks: Arc<Vec<gp_core::StockItem>>,
 }
 
+/// 行情模块的错误统一从这里出：保留原文，落到行情域错误码。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::MARKET_INTERNAL, message.to_string())
+}
+
 pub(crate) async fn fetch_eastmoney_public_json(
     client: &reqwest::Client,
     url: &str,
     label: &str,
     empty_is_valid: bool,
-) -> Result<Value, String> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("{label} request failed: {error}"))?;
+) -> Result<Value, CommandError> {
+    let response = client.get(url).send().await.map_err(|error| {
+        CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("{label} request failed: {error}"),
+        )
+    })?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("{label} returned HTTP {}", status.as_u16()));
+        return Err(CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("{label} returned HTTP {}", status.as_u16()),
+        ));
     }
-    let text = response
-        .text()
-        .await
-        .map_err(|error| format!("{label} response read failed: {error}"))?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{label} JSON parse failed: {error}"))?;
+    let text = response.text().await.map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("{label} response read failed: {error}"),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("{label} JSON parse failed: {error}"),
+        )
+    })?;
     normalize_eastmoney_public_json(value, label, empty_is_valid)
 }
 
@@ -206,7 +222,7 @@ pub(crate) async fn fetch_eastmoney_public_json_with_direct_retry(
     url: &str,
     label: &str,
     empty_is_valid: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let preferred_error = match tokio::time::timeout(
         Duration::from_secs(OBSERVE_FUNDAMENTAL_PREFERRED_TIMEOUT_SECS),
         fetch_eastmoney_public_json(preferred_client, url, label, empty_is_valid),
@@ -215,20 +231,27 @@ pub(crate) async fn fetch_eastmoney_public_json_with_direct_retry(
     {
         Ok(Ok(value)) => return Ok(value),
         Ok(Err(error)) => error,
-        Err(_) => format!(
+        Err(_) => CommandError::new(
+            codes::MARKET_NETWORK,
+            format!(
             "{label} preferred route timed out after {OBSERVE_FUNDAMENTAL_PREFERRED_TIMEOUT_SECS}s"
+        ),
         ),
     };
     fetch_eastmoney_public_json(direct_client, url, label, empty_is_valid)
         .await
-        .map_err(|direct_error| format!("{preferred_error}; direct retry failed: {direct_error}"))
+        .map_err(|direct_error| {
+            ce(format!(
+                "{preferred_error}; direct retry failed: {direct_error}"
+            ))
+        })
 }
 
 pub(crate) fn normalize_eastmoney_public_json(
     mut value: Value,
     label: &str,
     empty_is_valid: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if value.get("success").and_then(Value::as_bool) == Some(false) {
         let empty_response = value.get("code").and_then(Value::as_i64) == Some(9201);
         if empty_is_valid && empty_response {
@@ -236,13 +259,13 @@ pub(crate) fn normalize_eastmoney_public_json(
             value["success"] = json!(true);
             return Ok(value);
         }
-        return Err(format!(
+        return Err(ce(format!(
             "{label} rejected the request: {}",
             value
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error")
-        ));
+        )));
     }
     if value
         .get("result")
@@ -250,7 +273,10 @@ pub(crate) fn normalize_eastmoney_public_json(
         .and_then(Value::as_array)
         .is_none()
     {
-        return Err(format!("{label} response did not contain result.data"));
+        return Err(CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("{label} response did not contain result.data"),
+        ));
     }
     Ok(value)
 }
@@ -278,21 +304,21 @@ pub(crate) fn eastmoney_metric_period(
 }
 
 #[tauri::command]
-pub(crate) async fn api_market_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_market_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut status = market_data_status(&app)?;
         status["external_data"] = crate::external_data::status_for_app(&app)?;
         Ok(status)
     })
     .await
-    .map_err(|error| format!("market status worker failed: {error}"))?
+    .map_err(|error| ce(format!("market status worker failed: {error}")))?
 }
 
 #[tauri::command]
 pub(crate) async fn api_market_refresh(
     app: tauri::AppHandle,
     mut payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     use crate::external_data::{DataDomain, Market, RefreshRequest, RefreshRunState, RefreshScope};
     let now = crate::agent_ledger::current_epoch_millis();
     let request_id = payload
@@ -325,7 +351,7 @@ pub(crate) async fn api_market_refresh(
         )
     {
         let mut prior = serde_json::to_value(run.clone())
-            .map_err(|error| format!("encode market refresh status: {error}"))?;
+            .map_err(|error| ce(format!("encode market refresh status: {error}")))?;
         prior["run_id"] = Value::String(run.run_id);
         return Ok(prior);
     }
@@ -428,12 +454,12 @@ pub(crate) async fn api_market_refresh(
 pub(crate) fn api_market_ingest_tencent_quotes(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     core_mobile_market_data_ingest_tencent_quotes(app, payload)
 }
 
 #[tauri::command]
-pub(crate) fn api_market_clear_cache(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn api_market_clear_cache(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let cleared = core_mobile_market_data_clear(app.clone())?;
     Ok(json!({
         "removed_files": if cleared.get("removed").and_then(Value::as_bool).unwrap_or(false) { 1 } else { 0 },
@@ -448,7 +474,10 @@ pub(crate) fn adaptive_benchmark_codes() -> [&'static str; 3] {
 }
 
 #[tauri::command]
-pub(crate) fn api_stock_search(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_stock_search(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let query = payload
         .get("q")
         .and_then(Value::as_str)
@@ -484,7 +513,7 @@ pub(crate) fn api_stock_search(app: tauri::AppHandle, payload: Value) -> Result<
 }
 
 #[tauri::command]
-pub(crate) fn api_data_sources(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn api_data_sources(app: tauri::AppHandle) -> Result<Value, CommandError> {
     Ok(json!({
         "current": "tauri",
         "available": [{"id": "tauri", "name": "Tauri/Rust", "description": "Tauri/Rust native market cache and Tencent refresh path."}],
@@ -492,7 +521,9 @@ pub(crate) fn api_data_sources(app: tauri::AppHandle) -> Result<Value, String> {
     }))
 }
 
-pub(crate) async fn resume_explicit_cn_refreshes(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn resume_explicit_cn_refreshes(
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
     let store = crate::external_data::open_app_store(&app)?;
     let runs = store.foreground_recoveries()?;
     drop(store);
@@ -520,7 +551,7 @@ pub(crate) async fn resume_explicit_cn_refreshes(app: tauri::AppHandle) -> Resul
 async fn resume_explicit_cn_run(
     app: &tauri::AppHandle,
     run: &crate::external_data::RefreshRunStatus,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     use crate::external_data::{Market, RefreshRunState};
     let now = crate::agent_ledger::current_epoch_millis();
     let mut store = crate::external_data::open_app_store(app)?;
@@ -624,12 +655,12 @@ async fn resume_explicit_cn_run(
 }
 
 #[tauri::command]
-pub(crate) fn api_stock_get(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_stock_get(app: tauri::AppHandle, payload: Value) -> Result<Value, CommandError> {
     let code = payload
         .get("code")
         .and_then(Value::as_str)
         .and_then(normalize_stock_code)
-        .ok_or_else(|| "code is required".to_string())?;
+        .ok_or_else(|| CommandError::new(codes::MARKET_INPUT, "code is required"))?;
     let data = cached_market_data(&app)?;
     data.get("stocks")
         .and_then(Value::as_array)
@@ -644,16 +675,16 @@ pub(crate) fn api_stock_get(app: tauri::AppHandle, payload: Value) -> Result<Val
                 == Some(code.as_str())
         })
         .cloned()
-        .ok_or_else(|| "stock not found in Tauri/Rust cache".to_string())
+        .ok_or_else(|| ce("stock not found in Tauri/Rust cache"))
 }
 
 #[tauri::command]
-pub(crate) fn api_minutes(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_minutes(app: tauri::AppHandle, payload: Value) -> Result<Value, CommandError> {
     let code = payload
         .get("code")
         .and_then(Value::as_str)
         .and_then(normalize_stock_code)
-        .ok_or_else(|| "code is required".to_string())?;
+        .ok_or_else(|| CommandError::new(codes::MARKET_INPUT, "code is required"))?;
     let limit = payload_usize_field(&payload, "limit", 500, 1, 500);
     let data = cached_market_data(&app)?;
     let history = data
@@ -676,27 +707,32 @@ pub(crate) fn api_minutes(app: tauri::AppHandle, payload: Value) -> Result<Value
 }
 
 #[tauri::command]
-pub(crate) fn api_order_book(_app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_order_book(
+    _app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let code = payload
         .get("code")
         .and_then(Value::as_str)
         .and_then(normalize_stock_code)
-        .ok_or_else(|| "code is required".to_string())?;
+        .ok_or_else(|| CommandError::new(codes::MARKET_INPUT, "code is required"))?;
     Ok(
         json!({"code": code, "timestamp": Value::Null, "bids": [], "asks": [], "metrics": {}, "notes": ["Standalone order book is replaced by Tauri/Rust observe payload when available; no level-2 book is cached locally."]}),
     )
 }
 
 #[tauri::command]
-pub(crate) async fn core_validate_data_source(payload: Value) -> Result<Value, String> {
-    crate::runtime::run_cpu_bound("core_validate_data_source", move || {
+pub(crate) async fn core_validate_data_source(payload: Value) -> Result<Value, CommandError> {
+    let validated = crate::runtime::run_cpu_bound("core_validate_data_source", move || {
         gp_core::validate_data_source_value(payload).map_err(|error| error.to_string())
     })
-    .await?
+    .await
+    .map_err(CommandError::from)?;
+    validated.map_err(CommandError::from)
 }
 
 #[tauri::command]
-pub(crate) fn core_mobile_market_data_read(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn core_mobile_market_data_read(app: tauri::AppHandle) -> Result<Value, CommandError> {
     read_mobile_market_data(&app)
 }
 
@@ -704,12 +740,12 @@ pub(crate) fn core_mobile_market_data_read(app: tauri::AppHandle) -> Result<Valu
 pub(crate) fn core_mobile_market_data_write(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     write_mobile_market_data(&app, payload)
 }
 
 #[tauri::command]
-pub(crate) fn core_mobile_market_data_clear(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn core_mobile_market_data_clear(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let path = mobile_market_data_path(&app)?;
     let _ = path;
     Ok(json!({
@@ -720,7 +756,9 @@ pub(crate) fn core_mobile_market_data_clear(app: tauri::AppHandle) -> Result<Val
 }
 
 #[tauri::command]
-pub(crate) async fn core_mobile_network_probe(payload: Option<Value>) -> Result<Value, String> {
+pub(crate) async fn core_mobile_network_probe(
+    payload: Option<Value>,
+) -> Result<Value, CommandError> {
     let http_timeout = Duration::from_secs(TENCENT_NETWORK_PROBE_TIMEOUT_SECS);
     let payload_ref = payload.as_ref();
     let proxy_mode = proxy_mode_from_payload(payload_ref);
@@ -824,14 +862,14 @@ pub(crate) async fn probe_mobile_url(
 pub(crate) fn build_tencent_http_client(
     user_agent: &str,
     timeout: Duration,
-) -> Result<reqwest::Client, String> {
+) -> Result<reqwest::Client, CommandError> {
     build_http_client_with_proxy(user_agent, timeout, None)
 }
 
 pub(crate) fn build_direct_http_client(
     user_agent: &str,
     timeout: Duration,
-) -> Result<reqwest::Client, String> {
+) -> Result<reqwest::Client, CommandError> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
         .connect_timeout(Duration::from_secs(TENCENT_CONNECT_TIMEOUT_SECS))
@@ -839,14 +877,19 @@ pub(crate) fn build_direct_http_client(
         .no_proxy();
     apply_android_tls_backend(builder)?
         .build()
-        .map_err(|error| format!("create direct HTTP client failed: {error}"))
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("create direct HTTP client failed: {error}"),
+            )
+        })
 }
 
 pub(crate) fn build_http_client_with_proxy(
     user_agent: &str,
     timeout: Duration,
     payload: Option<&Value>,
-) -> Result<reqwest::Client, String> {
+) -> Result<reqwest::Client, CommandError> {
     let proxy = proxy_from_payload(payload);
     let key = HttpClientCacheKey {
         user_agent: user_agent.to_string(),
@@ -869,7 +912,12 @@ pub(crate) fn build_http_client_with_proxy(
     let builder = apply_android_tls_backend(builder)?;
     let client = apply_proxy_url(builder, proxy.as_deref())?
         .build()
-        .map_err(|error| format!("create HTTP client failed: {error}"))?;
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("create HTTP client failed: {error}"),
+            )
+        })?;
 
     let mut cache = http_client_cache()
         .lock()
@@ -887,14 +935,14 @@ pub(crate) fn http_client_cache() -> &'static Mutex<HashMap<HttpClientCacheKey, 
 #[cfg(target_os = "android")]
 pub(crate) fn apply_android_tls_backend(
     builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, String> {
+) -> Result<reqwest::ClientBuilder, CommandError> {
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     let provider = rustls::crypto::aws_lc_rs::default_provider();
     let tls_config = rustls::ClientConfig::builder_with_provider(provider.into())
         .with_safe_default_protocol_versions()
-        .map_err(|error| format!("create Android TLS config failed: {error}"))?
+        .map_err(|error| ce(format!("create Android TLS config failed: {error}")))?
         .with_root_certificates(root_store)
         .with_no_client_auth();
     Ok(builder.tls_backend_preconfigured(tls_config))
@@ -903,19 +951,23 @@ pub(crate) fn apply_android_tls_backend(
 #[cfg(not(target_os = "android"))]
 pub(crate) fn apply_android_tls_backend(
     builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, String> {
+) -> Result<reqwest::ClientBuilder, CommandError> {
     Ok(builder)
 }
 
 pub(crate) fn apply_proxy_url(
     builder: reqwest::ClientBuilder,
     proxy: Option<&str>,
-) -> Result<reqwest::ClientBuilder, String> {
+) -> Result<reqwest::ClientBuilder, CommandError> {
     let Some(proxy) = proxy else {
         return Ok(builder);
     };
-    let reqwest_proxy = reqwest::Proxy::all(proxy)
-        .map_err(|error| format!("invalid proxy URL {proxy}: {error}"))?;
+    let reqwest_proxy = reqwest::Proxy::all(proxy).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_INPUT,
+            format!("invalid proxy URL {proxy}: {error}"),
+        )
+    })?;
     Ok(builder.proxy(reqwest_proxy))
 }
 
@@ -969,7 +1021,10 @@ pub(crate) fn proxy_mode_from_payload(payload: Option<&Value>) -> String {
 }
 
 #[cfg(windows)]
-pub(crate) fn powershell_http_get_bytes(url: &str, timeout_secs: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn powershell_http_get_bytes(
+    url: &str,
+    timeout_secs: u64,
+) -> Result<Vec<u8>, CommandError> {
     let timeout_ms = timeout_secs.saturating_mul(1000).max(1000).to_string();
     let script = r#"& {
 $ErrorActionPreference = 'Stop'
@@ -1015,7 +1070,12 @@ try {
             script,
         ])
         .output()
-        .map_err(|error| format!("PowerShell HTTP 启动失败：{error}"))?;
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("PowerShell HTTP 启动失败：{error}"),
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1024,9 +1084,9 @@ try {
         } else {
             stdout.trim()
         };
-        return Err(format!(
-            "PowerShell HTTP 失败：{}",
-            truncate_for_note(detail, 240)
+        return Err(CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("PowerShell HTTP 失败：{}", truncate_for_note(detail, 240)),
         ));
     }
     let encoded = String::from_utf8_lossy(&output.stdout);
@@ -1034,14 +1094,23 @@ try {
     if encoded.is_empty() {
         return Err("PowerShell HTTP 返回空响应".to_string());
     }
-    general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|error| format!("PowerShell HTTP 响应解码失败：{error}"))
+    general_purpose::STANDARD.decode(encoded).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("PowerShell HTTP 响应解码失败：{error}"),
+        )
+    })
 }
 
 #[cfg(not(windows))]
-pub(crate) fn powershell_http_get_bytes(_url: &str, _timeout_secs: u64) -> Result<Vec<u8>, String> {
-    Err("PowerShell HTTP fallback only runs on Windows".to_string())
+pub(crate) fn powershell_http_get_bytes(
+    _url: &str,
+    _timeout_secs: u64,
+) -> Result<Vec<u8>, CommandError> {
+    Err(CommandError::new(
+        codes::MARKET_NETWORK,
+        "PowerShell HTTP fallback only runs on Windows",
+    ))
 }
 
 #[cfg(windows)]
@@ -1050,7 +1119,7 @@ pub(crate) fn powershell_http_get_bytes_with_headers(
     timeout_secs: u64,
     user_agent: &str,
     referer: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CommandError> {
     let timeout_ms = timeout_secs.saturating_mul(1000).max(1000).to_string();
     let script = r#"& {
 $ErrorActionPreference = 'Stop'
@@ -1101,7 +1170,12 @@ try {
             script,
         ])
         .output()
-        .map_err(|error| format!("PowerShell HTTP 启动失败：{error}"))?;
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("PowerShell HTTP 启动失败：{error}"),
+            )
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1110,9 +1184,9 @@ try {
         } else {
             stdout.trim()
         };
-        return Err(format!(
-            "PowerShell HTTP 失败：{}",
-            truncate_for_note(detail, 240)
+        return Err(CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("PowerShell HTTP 失败：{}", truncate_for_note(detail, 240)),
         ));
     }
     let encoded = String::from_utf8_lossy(&output.stdout);
@@ -1120,9 +1194,12 @@ try {
     if encoded.is_empty() {
         return Err("PowerShell HTTP 返回空响应".to_string());
     }
-    general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|error| format!("PowerShell HTTP 响应解码失败：{error}"))
+    general_purpose::STANDARD.decode(encoded).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("PowerShell HTTP 响应解码失败：{error}"),
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -1131,8 +1208,11 @@ pub(crate) fn powershell_http_get_bytes_with_headers(
     _timeout_secs: u64,
     _user_agent: &str,
     _referer: &str,
-) -> Result<Vec<u8>, String> {
-    Err("PowerShell HTTP fallback only runs on Windows".to_string())
+) -> Result<Vec<u8>, CommandError> {
+    Err(CommandError::new(
+        codes::MARKET_NETWORK,
+        "PowerShell HTTP fallback only runs on Windows",
+    ))
 }
 
 pub(crate) fn decode_utf8_lossy(bytes: Vec<u8>) -> String {
@@ -1177,7 +1257,7 @@ pub(crate) fn truncate_for_note(value: &str, max_chars: usize) -> String {
 pub(crate) async fn core_mobile_market_data_refresh_tencent(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::with_market_refresh_permit(
         "core_mobile_market_data_refresh_tencent",
         core_mobile_market_data_refresh_tencent_inner(app, payload),
@@ -1188,7 +1268,7 @@ pub(crate) async fn core_mobile_market_data_refresh_tencent(
 pub(crate) async fn core_mobile_market_data_refresh_tencent_inner(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let seed = refresh_seed_payload(&app, &payload);
     let financial_snapshot = refresh_financial_snapshot_payload(&app, &payload);
     let scan_candidates = payload
@@ -1324,7 +1404,7 @@ pub(crate) async fn core_mobile_market_data_refresh_tencent_inner(
 pub(crate) fn core_mobile_market_data_ingest_tencent_quotes(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let seed = refresh_seed_payload(&app, &payload);
     let financial_snapshot = refresh_financial_snapshot_payload(&app, &payload);
     let scan_candidates = payload
@@ -1357,13 +1437,22 @@ pub(crate) fn core_mobile_market_data_ingest_tencent_quotes(
         .filter(|value| !value.trim().is_empty())
         .map(|encoded| {
             if encoded.len() > MAX_TENCENT_WEBVIEW_QUOTE_BYTES * 2 {
-                return Err("Tencent WebView quote payload is too large".to_string());
+                return Err(CommandError::new(
+                    codes::MARKET_INPUT,
+                    "Tencent WebView quote payload is too large",
+                ));
             }
-            let bytes = general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| format!("decode Tencent WebView quote bytes failed: {error}"))?;
+            let bytes = general_purpose::STANDARD.decode(encoded).map_err(|error| {
+                CommandError::new(
+                    codes::MARKET_PROVIDER,
+                    format!("decode Tencent WebView quote bytes failed: {error}"),
+                )
+            })?;
             if bytes.len() > MAX_TENCENT_WEBVIEW_QUOTE_BYTES {
-                return Err("Tencent WebView quote payload is too large".to_string());
+                return Err(CommandError::new(
+                    codes::MARKET_INPUT,
+                    "Tencent WebView quote payload is too large",
+                ));
             }
             Ok(bytes)
         })
@@ -1375,15 +1464,21 @@ pub(crate) fn core_mobile_market_data_ingest_tencent_quotes(
         let text = payload
             .get("quote_text")
             .and_then(Value::as_str)
-            .ok_or_else(|| "missing Tencent quote text from WebView".to_string())?
+            .ok_or_else(|| ce("missing Tencent quote text from WebView"))?
             .to_string();
         if text.len() > MAX_TENCENT_WEBVIEW_QUOTE_BYTES {
-            return Err("Tencent WebView quote payload is too large".to_string());
+            return Err(CommandError::new(
+                codes::MARKET_INPUT,
+                "Tencent WebView quote payload is too large",
+            ));
         }
         text
     };
     if quote_text.trim().is_empty() {
-        return Err("Tencent quote text from WebView is empty".to_string());
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            "Tencent quote text from WebView is empty",
+        ));
     }
     let webview_status = payload
         .get("webview_status")
@@ -1696,12 +1791,15 @@ pub(crate) async fn refresh_tencent_market_data(
     financial_snapshot: Value,
     history_prefetch_limit: usize,
     network_payload: Option<&Value>,
-) -> Result<TencentRefreshResult, String> {
+) -> Result<TencentRefreshResult, CommandError> {
     let (seed_stocks, seed_codes) = seed_stock_maps(&seed);
     let enriched_stocks = enriched_stock_maps(&seed_stocks, &financial_snapshot);
     let candidate_codes = build_candidate_codes(&seed_codes, scan_candidates, max_candidates);
     if candidate_codes.is_empty() {
-        return Err("mobile market refresh has no candidate stock codes".to_string());
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            "mobile market refresh has no candidate stock codes",
+        ));
     }
 
     let client = build_http_client_with_proxy(
@@ -1765,46 +1863,51 @@ pub(crate) async fn refresh_tencent_market_data(
         .take(effective_batch_count)
         .map(|(offset, batch)| (offset, batch.to_vec()))
         .collect();
-    let mut fetch_results: Vec<(usize, Result<(TencentQuotePayload, u128), (String, u128)>)> =
-        stream::iter(window)
-            .map(|(offset, batch)| {
-                let client = &client;
-                async move {
-                    let batch_started_at = epoch_millis();
-                    emit_market_refresh_log(
-                        app,
-                        "batch_request",
-                        "info",
-                        json!({
-                            "batch_index": offset + 1,
-                            "total_batches": total_batches,
-                            "code_count": batch.len(),
-                            "first_code": batch.first(),
-                            "last_code": batch.last(),
-                        }),
-                    );
-                    let fetch_result = match tokio::time::timeout(
-                        batch_timeout,
-                        fetch_tencent_quotes(client, &batch, request_timeout),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(format!(
+    let mut fetch_results: Vec<(
+        usize,
+        Result<(TencentQuotePayload, u128), (CommandError, u128)>,
+    )> = stream::iter(window)
+        .map(|(offset, batch)| {
+            let client = &client;
+            async move {
+                let batch_started_at = epoch_millis();
+                emit_market_refresh_log(
+                    app,
+                    "batch_request",
+                    "info",
+                    json!({
+                        "batch_index": offset + 1,
+                        "total_batches": total_batches,
+                        "code_count": batch.len(),
+                        "first_code": batch.first(),
+                        "last_code": batch.last(),
+                    }),
+                );
+                let fetch_result = match tokio::time::timeout(
+                    batch_timeout,
+                    fetch_tencent_quotes(client, &batch, request_timeout),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(CommandError::new(
+                        codes::MARKET_NETWORK,
+                        format!(
                             "Tencent quote batch timed out after {} seconds",
                             batch_timeout.as_secs()
-                        )),
-                    };
-                    let elapsed_ms = epoch_millis().saturating_sub(batch_started_at);
-                    let timed_result = fetch_result
-                        .map(|payload| (payload, elapsed_ms))
-                        .map_err(|error| (error, elapsed_ms));
-                    (offset, timed_result)
-                }
-            })
-            .buffer_unordered(TENCENT_FETCH_CONCURRENCY)
-            .collect()
-            .await;
+                        ),
+                    )),
+                };
+                let elapsed_ms = epoch_millis().saturating_sub(batch_started_at);
+                let timed_result = fetch_result
+                    .map(|payload| (payload, elapsed_ms))
+                    .map_err(|error| (error, elapsed_ms));
+                (offset, timed_result)
+            }
+        })
+        .buffer_unordered(TENCENT_FETCH_CONCURRENCY)
+        .collect()
+        .await;
 
     // The whole window is attempted, so advance the cursor to its end up front.
     let next_batch_start = batch_end;
@@ -1857,11 +1960,11 @@ pub(crate) async fn refresh_tencent_market_data(
                     json!({
                         "batch_index": offset + 1,
                         "elapsed_ms": elapsed_ms,
-                        "error": error,
+                        "error": error.to_string(),
                     }),
                 );
                 if error_samples.len() < 3 {
-                    error_samples.push(error);
+                    error_samples.push(error.to_string());
                 }
                 failed_batches += 1;
             }
@@ -1884,9 +1987,9 @@ pub(crate) async fn refresh_tencent_market_data(
         } else {
             format!("; recent errors: {}", error_samples.join(" | "))
         };
-        return Err(format!(
+        return Err(ce(format!(
             "Tencent quote refresh returned no valid stocks{suffix}"
-        ));
+        )));
     }
     stocks.sort_by(|left, right| {
         left.get("code")
@@ -1970,12 +2073,15 @@ pub(crate) fn ingest_tencent_market_data(
     webview_byte_len: usize,
     webview_elapsed_ms: u64,
     financial_snapshot: Value,
-) -> Result<TencentRefreshResult, String> {
+) -> Result<TencentRefreshResult, CommandError> {
     let (seed_stocks, seed_codes) = seed_stock_maps(&seed);
     let enriched_stocks = enriched_stock_maps(&seed_stocks, &financial_snapshot);
     let candidate_codes = build_candidate_codes(&seed_codes, scan_candidates, max_candidates);
     if candidate_codes.is_empty() {
-        return Err("mobile market refresh has no candidate stock codes".to_string());
+        return Err(CommandError::new(
+            codes::MARKET_INPUT,
+            "mobile market refresh has no candidate stock codes",
+        ));
     }
 
     emit_market_refresh_log(
@@ -2087,10 +2193,10 @@ pub(crate) fn ingest_tencent_market_data(
     let preserved =
         append_all_preserved_seed_stocks(&seed_stocks, &enriched_stocks, &mut stocks, &mut seen);
     if stocks.is_empty() {
-        return Err(format!(
+        return Err(ce(format!(
             "Tencent WebView quote returned no valid stocks; sample: {}",
             quote_text.chars().take(160).collect::<String>()
-        ));
+        )));
     }
     stocks.sort_by(|left, right| {
         left.get("code")
@@ -2528,18 +2634,18 @@ pub(crate) async fn fetch_tencent_quotes(
     client: &reqwest::Client,
     codes: &[String],
     request_timeout: Duration,
-) -> Result<TencentQuotePayload, String> {
+) -> Result<TencentQuotePayload, CommandError> {
     #[cfg(windows)]
     async fn fetch_tencent_quotes_windows_fallback(
         url: &str,
         timeout_secs: u64,
         status: Option<u16>,
         primary_error: Option<String>,
-    ) -> Result<TencentQuotePayload, String> {
+    ) -> Result<TencentQuotePayload, CommandError> {
         let url = url.to_string();
         let fallback = crate::runtime::run_transport_bound("market blocking transport", move || powershell_http_get_bytes(&url, timeout_secs))
         .await
-        .map_err(|error| format!("Tencent quote PowerShell fallback task failed: {error}"))?
+        .map_err(|error| CommandError::new(codes::MARKET_NETWORK, format!("Tencent quote PowerShell fallback task failed: {error}")))?
         .map_err(|powershell_error| match (status, primary_error.as_deref()) {
             (Some(status), _) => format!("Tencent quote HTTP {status}; PowerShell fallback failed: {powershell_error}"),
             (None, Some(error)) => format!("Tencent quote request failed: {error}; PowerShell fallback failed: {powershell_error}"),
@@ -2561,11 +2667,20 @@ pub(crate) async fn fetch_tencent_quotes(
         _timeout_secs: u64,
         status: Option<u16>,
         primary_error: Option<String>,
-    ) -> Result<TencentQuotePayload, String> {
+    ) -> Result<TencentQuotePayload, CommandError> {
         match (status, primary_error) {
-            (Some(status), _) => Err(format!("Tencent quote HTTP {status}")),
-            (None, Some(error)) => Err(format!("Tencent quote request failed: {error}")),
-            (None, None) => Err("Tencent quote fallback failed".to_string()),
+            (Some(status), _) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("Tencent quote HTTP {status}"),
+            )),
+            (None, Some(error)) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("Tencent quote request failed: {error}"),
+            )),
+            (None, None) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                "Tencent quote fallback failed",
+            )),
         }
     }
     let symbols: Vec<String> = codes
@@ -2593,10 +2708,12 @@ pub(crate) async fn fetch_tencent_quotes(
                 )
                 .await;
             }
-            let bytes = response
-                .bytes()
-                .await
-                .map_err(|error| format!("Tencent quote body read failed: {error}"))?;
+            let bytes = response.bytes().await.map_err(|error| {
+                CommandError::new(
+                    codes::MARKET_IO,
+                    format!("Tencent quote body read failed: {error}"),
+                )
+            })?;
             let byte_len = bytes.len();
             let (text, _, _) = encoding_rs::GBK.decode(&bytes);
             Ok(TencentQuotePayload {
@@ -3299,7 +3416,7 @@ pub(crate) async fn http_get_text_with_headers_first(
     timeout_secs: u64,
     user_agent: &str,
     referer: &str,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let fetch = async {
         let powershell_url = url.to_string();
         let powershell_user_agent = user_agent.to_string();
@@ -3317,7 +3434,10 @@ pub(crate) async fn http_get_text_with_headers_first(
         let powershell_error = match powershell_result {
             Ok(Ok(bytes)) => return Ok(decode_utf8_lossy(bytes)),
             Ok(Err(error)) => error,
-            Err(error) => format!("PowerShell HTTP task failed: {error}"),
+            Err(error) => CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("PowerShell HTTP task failed: {error}"),
+            ),
         };
         match client
             .get(url)
@@ -3328,19 +3448,26 @@ pub(crate) async fn http_get_text_with_headers_first(
             .await
         {
             Ok(response) if response.status().is_success() => {
-                response.text().await.map_err(|error| error.to_string())
+                response.text().await.map_err(|error| ce(error.to_string()))
             }
-            Ok(response) => Err(format!(
-                "PowerShell: {powershell_error}; reqwest HTTP {}",
-                response.status().as_u16()
+            Ok(response) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                format!(
+                    "PowerShell: {powershell_error}; reqwest HTTP {}",
+                    response.status().as_u16()
+                ),
             )),
-            Err(error) => Err(format!("PowerShell: {powershell_error}; reqwest: {error}")),
+            Err(error) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("PowerShell: {powershell_error}; reqwest: {error}"),
+            )),
         }
     };
     match tokio::time::timeout(Duration::from_secs(timeout_secs), fetch).await {
         Ok(result) => result,
-        Err(_) => Err(format!(
-            "PowerShell/reqwest HTTP request timed out after {timeout_secs} seconds"
+        Err(_) => Err(CommandError::new(
+            codes::MARKET_NETWORK,
+            format!("PowerShell/reqwest HTTP request timed out after {timeout_secs} seconds"),
         )),
     }
 }
@@ -3567,7 +3694,7 @@ pub(crate) async fn fetch_quarterly_eps_chain(code: &str) -> QuarterlyEpsFetchRe
 pub(crate) async fn fetch_ths_quarterly_eps(
     client: &reqwest::Client,
     code: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let normalized =
         normalize_stock_code(code).ok_or_else(|| format!("无法识别同花顺财报代码：{code}"))?;
     let digits = normalized
@@ -3614,7 +3741,7 @@ pub(crate) async fn fetch_ths_quarterly_eps(
     parse_ths_quarterly_eps_json(&text)
 }
 
-pub(crate) fn parse_ths_quarterly_eps_json(text: &str) -> Result<Vec<Value>, String> {
+pub(crate) fn parse_ths_quarterly_eps_json(text: &str) -> Result<Vec<Value>, CommandError> {
     let value: Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
     let rows = value
         .get("data")
@@ -3659,7 +3786,7 @@ pub(crate) fn parse_ths_quarterly_eps_json(text: &str) -> Result<Vec<Value>, Str
 pub(crate) async fn fetch_sina_quarterly_eps(
     client: &reqwest::Client,
     code: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let normalized =
         normalize_stock_code(code).ok_or_else(|| format!("无法识别新浪财报代码：{code}"))?;
     let digits = normalized
@@ -3677,9 +3804,12 @@ pub(crate) async fn fetch_sina_quarterly_eps(
                 .bytes()
                 .await
                 .map(|bytes| bytes.to_vec())
-                .map_err(|error| error.to_string()),
-            Ok(response) => Err(format!("HTTP {}", response.status().as_u16())),
-            Err(error) => Err(error.to_string()),
+                .map_err(|error| ce(error.to_string())),
+            Ok(response) => Err(CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("HTTP {}", response.status().as_u16()),
+            )),
+            Err(error) => Err(ce(error.to_string())),
         };
         let bytes = match bytes_result {
             Ok(bytes) => bytes,
@@ -3704,7 +3834,7 @@ pub(crate) async fn fetch_sina_quarterly_eps(
         }
     }
     if points.is_empty() && !errors.is_empty() {
-        return Err(errors.join("；"));
+        return Err(ce(errors.join("；")));
     }
     Ok(points)
 }
@@ -4248,7 +4378,7 @@ pub(crate) async fn fetch_observe_daily_history(
     code: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let timeout = Duration::from_secs(OBSERVE_HISTORY_TIMEOUT_SECS);
     let client = build_tencent_http_client("Mozilla/5.0 GuXuanYou/0.3 observe history", timeout)?;
     let mut errors = Vec::new();
@@ -4279,7 +4409,7 @@ pub(crate) async fn fetch_observe_daily_history(
                 None
             }
         };
-    choose_longer_history(tencent_rows, eastmoney_rows).ok_or_else(|| errors.join("\u{ff1b}"))
+    choose_longer_history(tencent_rows, eastmoney_rows).ok_or_else(|| ce(errors.join("\u{ff1b}")))
 }
 
 pub(crate) fn choose_longer_history(
@@ -4301,7 +4431,7 @@ pub(crate) async fn fetch_daily_history_text(
     client: &reqwest::Client,
     url: &str,
     label: &str,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let primary_error = match client.get(url).send().await {
         Ok(response) if response.status().is_success() => match response.text().await {
             Ok(text) => return Ok(text),
@@ -4318,13 +4448,23 @@ pub(crate) async fn fetch_daily_history_text(
             powershell_http_get_bytes(&fallback_url, OBSERVE_HISTORY_TIMEOUT_SECS)
         })
         .await
-        .map_err(|error| format!("{primary_error}; PowerShell fallback task failed: {error}"))?
-        .map_err(|error| format!("{primary_error}; PowerShell fallback failed: {error}"))?;
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("{primary_error}; PowerShell fallback task failed: {error}"),
+            )
+        })?
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_NETWORK,
+                format!("{primary_error}; PowerShell fallback failed: {error}"),
+            )
+        })?;
         return Ok(decode_utf8_lossy(bytes));
     }
 
     #[cfg(not(windows))]
-    Err(primary_error)
+    Err(ce(primary_error))
 }
 
 pub(crate) async fn fetch_eastmoney_daily_history(
@@ -4332,7 +4472,7 @@ pub(crate) async fn fetch_eastmoney_daily_history(
     code: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let digits = code
         .get(..6)
         .ok_or_else(|| format!("\u{65e0}\u{6548}\u{80a1}\u{7968}\u{4ee3}\u{7801}\u{ff1a}{code}"))?;
@@ -4363,7 +4503,7 @@ pub(crate) async fn fetch_tencent_daily_history(
     code: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let symbol = tencent_symbol(code).ok_or_else(|| {
         format!("\u{65e0}\u{6cd5}\u{8bc6}\u{522b}\u{884c}\u{60c5}\u{4ee3}\u{7801}\u{ff1a}{code}")
     })?;
@@ -4488,19 +4628,19 @@ pub(crate) fn compact_date_key(raw: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn cached_market_data(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn cached_market_data(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     let cache = read_mobile_market_data(app)?;
     if !cache
         .get("exists")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Err("股票池为空，请先联网更新股票池。".to_string());
+        return Err(ce("股票池为空，请先联网更新股票池。"));
     }
     cache
         .get("data")
         .cloned()
-        .ok_or_else(|| "股票池缓存缺少 data 字段，请清理缓存后重新联网更新。".to_string())
+        .ok_or_else(|| ce("股票池缓存缺少 data 字段，请清理缓存后重新联网更新。"))
 }
 
 pub(crate) fn strip_core_side_payload_fields(mut payload: Value) -> Value {
@@ -4510,7 +4650,7 @@ pub(crate) fn strip_core_side_payload_fields(mut payload: Value) -> Value {
     payload
 }
 
-pub(crate) fn market_data_status(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn market_data_status(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     let _update_guard = mobile_market_update_lock()
         .lock()
         .map_err(|_| "mobile market update lock is poisoned".to_string())?;
@@ -4627,7 +4767,7 @@ type ExternalMarketRecordSet = HashMap<
 fn external_market_records(
     data: &Value,
     source_id: &str,
-) -> Result<ExternalMarketRecordSet, String> {
+) -> Result<ExternalMarketRecordSet, CommandError> {
     let (typed, _) = parse_mobile_market_data_snapshot(data, "external market dataset")?;
     external_market_records_from_typed(data, &typed, source_id)
 }
@@ -4636,7 +4776,7 @@ fn external_market_records_from_typed(
     data: &Value,
     typed: &gp_core::CoreDataSet,
     source_id: &str,
-) -> Result<ExternalMarketRecordSet, String> {
+) -> Result<ExternalMarketRecordSet, CommandError> {
     use crate::external_data::{DataDomain, Market, StoredRecord};
     let mut grouped: HashMap<_, Vec<StoredRecord>> = HashMap::new();
     let fetched_at = data
@@ -4695,8 +4835,8 @@ fn external_market_records_from_typed(
             metadata,
         ));
     for stock in &typed.stocks {
-        let base =
-            serde_json::to_value(stock).map_err(|error| format!("encode market stock: {error}"))?;
+        let base = serde_json::to_value(stock)
+            .map_err(|error| ce(format!("encode market stock: {error}")))?;
         let security = serde_json::json!({
             "code": stock.code,
             "name": stock.name,
@@ -4797,7 +4937,7 @@ fn external_market_records_from_typed(
     }
     for (index, relation) in typed.relations.iter().enumerate() {
         let payload = serde_json::to_value(relation)
-            .map_err(|error| format!("encode market relation: {error}"))?;
+            .map_err(|error| ce(format!("encode market relation: {error}")))?;
         let key = format!("{index:08}-{}", sha256_hex(payload.to_string().as_bytes()));
         grouped
             .entry((DataDomain::Relations, Market::China))
@@ -4834,12 +4974,12 @@ fn external_market_records_from_typed(
                 "unverified",
                 vec![],
                 serde_json::to_value(bars)
-                    .map_err(|error| format!("encode market history: {error}"))?,
+                    .map_err(|error| ce(format!("encode market history: {error}")))?,
             ));
     }
     for (code, financial) in &typed.financials {
         let mut payload = serde_json::to_value(financial)
-            .map_err(|error| format!("encode market financials: {error}"))?;
+            .map_err(|error| ce(format!("encode market financials: {error}")))?;
         let raw = data.get("financials").and_then(|items| items.get(code));
         if let Some(updated_at) =
             cache_epoch_ms(raw.and_then(|row| row.get("supplement_updated_at_epoch_ms")))
@@ -4881,12 +5021,12 @@ fn external_market_records_from_typed(
                 "unverified",
                 vec![],
                 serde_json::to_value(factors)
-                    .map_err(|error| format!("encode market factor snapshots: {error}"))?,
+                    .map_err(|error| ce(format!("encode market factor snapshots: {error}")))?,
             ));
     }
     for (code, evidence) in &typed.capital_evidence {
         let mut payload = serde_json::to_value(evidence)
-            .map_err(|error| format!("encode market capital evidence: {error}"))?;
+            .map_err(|error| ce(format!("encode market capital evidence: {error}")))?;
         let raw = data
             .get("capital_evidence")
             .and_then(|items| items.get(code));
@@ -4921,7 +5061,7 @@ fn external_market_records_from_typed(
 
 pub(crate) fn project_market_store(
     store: &crate::external_data::DataStore,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, CommandError> {
     use crate::external_data::DataDomain;
     let mut records = Vec::new();
     for (domain, market) in external_market_domains() {
@@ -5011,7 +5151,7 @@ struct LegacyMarketMigration {
 fn import_legacy_market_source(
     store: &mut crate::external_data::DataStore,
     path: &Path,
-) -> Result<LegacyMarketMigration, String> {
+) -> Result<LegacyMarketMigration, CommandError> {
     let _migration_guard = legacy_market_migration_lock()
         .lock()
         .map_err(|_| "legacy market migration lock is poisoned".to_string())?;
@@ -5025,6 +5165,7 @@ fn import_legacy_market_source(
                 .unwrap_or_else(|| value.clone());
             let (typed, _) = parse_mobile_market_data_snapshot(&data, "legacy mobile market data")?;
             external_market_records_from_typed(&data, &typed, MOBILE_MARKET_DATA_FILE)
+                .map_err(String::from)
         })?;
     let promoted = batch
         .reports
@@ -5078,7 +5219,7 @@ pub(crate) fn project_market_store_with_legacy(
         crate::external_data::DataDomain,
         crate::external_data::Market,
     )>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, CommandError> {
     use crate::external_data::{DataDomain, Market};
     let external = project_market_store(store)?;
     if external.is_none() && promoted.is_empty() {
@@ -5271,7 +5412,7 @@ pub(crate) fn store_market_dataset(
     store: &mut crate::external_data::DataStore,
     data: &Value,
     source_id: &str,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let mut grouped = external_market_records(data, source_id)?;
     let mut errors = Vec::new();
     for (domain, market) in external_market_domains() {
@@ -5294,22 +5435,22 @@ pub(crate) fn store_market_dataset(
         }
     }
     if !errors.is_empty() {
-        return Err(format!(
+        return Err(ce(format!(
             "some external market domains failed to commit: {}",
             errors.join("; ")
-        ));
+        )));
     }
     Ok(())
 }
 
-pub(crate) fn read_mobile_market_data(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn read_mobile_market_data(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     read_mobile_market_data_record(app, true)
 }
 
 pub(crate) fn read_mobile_market_data_record(
     app: &tauri::AppHandle,
     include_data: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let _read_guard = mobile_market_read_lock()
         .lock()
         .map_err(|_| "mobile market read lock is poisoned".to_string())?;
@@ -5504,7 +5645,7 @@ pub(crate) fn read_mobile_market_data_record(
 pub(crate) fn write_mobile_market_data(
     app: &tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     write_mobile_market_data_record(app, payload, true)
 }
 
@@ -5512,7 +5653,7 @@ pub(crate) fn write_mobile_market_data_record(
     app: &tauri::AppHandle,
     payload: Value,
     include_data: bool,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let _update_guard = mobile_market_update_lock()
         .lock()
         .map_err(|_| "mobile market update lock is poisoned".to_string())?;
@@ -5534,8 +5675,12 @@ pub(crate) fn write_mobile_market_data_record(
         return Err(error);
     }
     clear_mobile_market_data_patches(app)?;
-    let bytes = serde_json::to_vec(&payload)
-        .map_err(|error| format!("serialize mobile market data failed: {error}"))?;
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("serialize mobile market data failed: {error}"),
+        )
+    })?;
     remember_mobile_market_data_cache(
         &path,
         bytes.len() as u64,
@@ -5563,19 +5708,23 @@ fn write_mobile_market_data_legacy(
     include_data: bool,
     typed: Arc<gp_core::CoreDataSet>,
     summary: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let root = path
         .parent()
         .ok_or_else(|| "mobile market cache path has no parent".to_string())?;
     fs::create_dir_all(root)
-        .map_err(|error| format!("create mobile market cache dir failed: {error}"))?;
+        .map_err(|error| ce(format!("create mobile market cache dir failed: {error}")))?;
     let tmp_path = root.join(format!(
         "{}.tmp-{}",
         MOBILE_MARKET_DATA_FILE,
         epoch_millis()
     ));
-    let bytes = serde_json::to_vec(&payload)
-        .map_err(|error| format!("serialize mobile market data failed: {error}"))?;
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_IO,
+            format!("serialize mobile market data failed: {error}"),
+        )
+    })?;
     write_mobile_market_data_with_retry(&tmp_path, &path, &bytes)?;
     clear_mobile_market_data_patches(app)?;
     remember_mobile_market_data_cache(
@@ -5602,12 +5751,12 @@ pub(crate) fn retry_with_attempts<T, F>(
     attempts: usize,
     delay_ms: u64,
     mut op: F,
-) -> Result<T, String>
+) -> Result<T, CommandError>
 where
-    F: FnMut(usize) -> Result<T, String>,
+    F: FnMut(usize) -> Result<T, CommandError>,
 {
     let attempts = attempts.max(1);
-    let mut last_error: Option<String> = None;
+    let mut last_error: Option<CommandError> = None;
     for attempt in 0..attempts {
         match op(attempt) {
             Ok(value) => return Ok(value),
@@ -5619,14 +5768,14 @@ where
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| "operation failed".to_string()))
+    Err(last_error.unwrap_or_else(|| ce("operation failed")))
 }
 
 pub(crate) fn write_mobile_market_data_with_retry(
     tmp_path: &Path,
     path: &Path,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     retry_with_attempts(
         MOBILE_MARKET_WRITE_RETRY_ATTEMPTS,
         MOBILE_MARKET_WRITE_RETRY_DELAY_MS,
@@ -5638,8 +5787,8 @@ pub(crate) fn write_mobile_market_data_once(
     _tmp_path: &Path,
     path: &Path,
     bytes: &[u8],
-) -> Result<(), String> {
-    crate::durability::atomic_write_json(path, bytes)
+) -> Result<(), CommandError> {
+    crate::durability::atomic_write_json(path, bytes).map_err(CommandError::from)
 }
 
 pub(crate) fn market_quote_coverage(
@@ -5899,7 +6048,7 @@ pub(crate) fn apply_market_data_patch(data: &mut Value, patch: &Value) {
     }
 }
 
-pub(crate) fn mobile_market_patch_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn mobile_market_patch_dir(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let path = mobile_market_data_path(app)?;
     let root = path
         .parent()
@@ -5910,13 +6059,18 @@ pub(crate) fn mobile_market_patch_dir(app: &tauri::AppHandle) -> Result<PathBuf,
 pub(crate) fn apply_persisted_market_data_patches(
     app: &tauri::AppHandle,
     data: &mut Value,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     let root = mobile_market_patch_dir(app)?;
     if !root.exists() {
         return Ok(0);
     }
     let mut paths = fs::read_dir(&root)
-        .map_err(|error| format!("read mobile market patches failed: {error}"))?
+        .map_err(|error| {
+            CommandError::new(
+                codes::MARKET_IO,
+                format!("read mobile market patches failed: {error}"),
+            )
+        })?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
@@ -5931,11 +6085,11 @@ pub(crate) fn apply_persisted_market_data_patches(
     Ok(applied)
 }
 
-pub(crate) fn clear_mobile_market_data_patches(app: &tauri::AppHandle) -> Result<(), String> {
+pub(crate) fn clear_mobile_market_data_patches(app: &tauri::AppHandle) -> Result<(), CommandError> {
     let root = mobile_market_patch_dir(app)?;
     if root.exists() {
         fs::remove_dir_all(&root)
-            .map_err(|error| format!("clear mobile market patches failed: {error}"))?;
+            .map_err(|error| ce(format!("clear mobile market patches failed: {error}")))?;
     }
     Ok(())
 }
@@ -5968,10 +6122,10 @@ pub(crate) fn market_data_patch_codes(patch: &Value) -> Vec<String> {
 pub(crate) fn persist_market_data_patch_sync(
     app: &tauri::AppHandle,
     patch: &Value,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     let root = mobile_market_patch_dir(app)?;
     fs::create_dir_all(&root)
-        .map_err(|error| format!("create mobile market patch dir failed: {error}"))?;
+        .map_err(|error| ce(format!("create mobile market patch dir failed: {error}")))?;
     let mut written = 0usize;
     for code in market_data_patch_codes(patch) {
         let safe_code = sanitize_path_part(&code);
@@ -5983,8 +6137,12 @@ pub(crate) fn persist_market_data_patch_sync(
         };
         let code_patch = market_data_patch_for_codes(patch, std::slice::from_ref(&code));
         apply_market_data_patch(&mut merged_patch, &code_patch);
-        let bytes = serde_json::to_vec(&merged_patch)
-            .map_err(|error| format!("serialize mobile market patch failed: {error}"))?;
+        let bytes = serde_json::to_vec(&merged_patch).map_err(|error| {
+            CommandError::new(
+                codes::MARKET_IO,
+                format!("serialize mobile market patch failed: {error}"),
+            )
+        })?;
         let tmp_path = root.join(format!("{safe_code}.tmp-{}", epoch_millis()));
         write_mobile_market_data_once(&tmp_path, &path, &bytes)?;
         written += 1;
@@ -5995,7 +6153,7 @@ pub(crate) fn persist_market_data_patch_sync(
 pub(crate) async fn persist_market_data_patch_updates(
     app: tauri::AppHandle,
     patch: Value,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     crate::runtime::run_io_bound("persist market data patches", move || {
         let _update_guard = mobile_market_update_lock()
             .lock()
@@ -6052,26 +6210,30 @@ pub(crate) async fn persist_market_data_patch_updates(
 pub(crate) fn parse_mobile_market_data_snapshot(
     data: &Value,
     label: &str,
-) -> Result<(Arc<gp_core::CoreDataSet>, Value), String> {
+) -> Result<(Arc<gp_core::CoreDataSet>, Value), CommandError> {
     let normalized = crate::metric_units::normalize_stock_dataset(data)?;
-    let typed = serde_json::from_value::<gp_core::CoreDataSet>(normalized)
-        .map_err(|error| format!("{label} parse failed: {error}"))?;
+    let typed = serde_json::from_value::<gp_core::CoreDataSet>(normalized).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("{label} parse failed: {error}"),
+        )
+    })?;
     let summary = gp_core::validate_data_set(&typed)
-        .map_err(|error| format!("{label} validation failed: {error}"))?;
+        .map_err(|error| ce(format!("{label} validation failed: {error}")))?;
     let summary = serde_json::to_value(summary)
-        .map_err(|error| format!("{label} summary serialization failed: {error}"))?;
+        .map_err(|error| ce(format!("{label} summary serialization failed: {error}")))?;
     Ok((Arc::new(typed), summary))
 }
 
 pub(crate) fn cached_market_data_snapshot(
     app: &tauri::AppHandle,
-) -> Result<Arc<gp_core::CoreDataSet>, String> {
+) -> Result<Arc<gp_core::CoreDataSet>, CommandError> {
     Ok(cached_market_data_views(app)?.typed)
 }
 
 pub(crate) fn cached_market_data_views(
     app: &tauri::AppHandle,
-) -> Result<MarketDataSnapshot, String> {
+) -> Result<MarketDataSnapshot, CommandError> {
     let path = mobile_market_data_path(app)?;
     let cache = read_mobile_market_data_record(app, false)?;
     if !cache
@@ -6079,7 +6241,7 @@ pub(crate) fn cached_market_data_views(
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Err("股票池为空，请先联网更新股票池。".to_string());
+        return Err(ce("股票池为空，请先联网更新股票池。"));
     }
     let slot = mobile_market_data_cache()
         .lock()
@@ -6089,7 +6251,7 @@ pub(crate) fn cached_market_data_views(
             data: Arc::clone(&entry.data),
             typed: Arc::clone(&entry.typed),
         })
-        .ok_or_else(|| "mobile market typed snapshot is unavailable".to_string())
+        .ok_or_else(|| ce("mobile market typed snapshot is unavailable"))
 }
 
 pub(crate) fn remember_mobile_market_data_cache(
@@ -6152,11 +6314,11 @@ pub(crate) fn optional_trimmed_string(value: Option<&Value>) -> Option<String> {
     }
 }
 
-pub(crate) fn mobile_market_data_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn mobile_market_data_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("get app data dir failed: {error}"))?;
+        .map_err(|error| ce(format!("get app data dir failed: {error}")))?;
     root.push("market");
     root.push(MOBILE_MARKET_DATA_FILE);
     Ok(root)
@@ -6243,11 +6405,19 @@ fn sha256_file(path: &Path) -> Result<String, std::io::Error> {
         .collect())
 }
 
-pub(crate) fn read_json_file(path: &Path) -> Result<Value, String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("读取 JSON 失败：{}：{error}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| format!("解析 JSON 失败：{}：{error}", path.display()))
+pub(crate) fn read_json_file(path: &Path) -> Result<Value, CommandError> {
+    let bytes = fs::read(path).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("读取 JSON 失败：{}：{error}", path.display()),
+        )
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CommandError::new(
+            codes::MARKET_PROVIDER,
+            format!("解析 JSON 失败：{}：{error}", path.display()),
+        )
+    })
 }
 
 pub(crate) fn find_first_current_manifest(root: &Path) -> Option<PathBuf> {

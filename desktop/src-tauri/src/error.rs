@@ -30,6 +30,11 @@ pub mod codes {
     pub const RESEARCH_INDEX_STALE: &str = "research.index_stale";
     pub const RESEARCH_PACK_INVALID: &str = "research.pack_invalid";
     pub const RESEARCH_INTERNAL: &str = "research.internal";
+    pub const MARKET_IO: &str = "market.io";
+    pub const MARKET_NETWORK: &str = "market.network";
+    pub const MARKET_PROVIDER: &str = "market.provider";
+    pub const MARKET_INPUT: &str = "market.input";
+    pub const MARKET_INTERNAL: &str = "market.internal";
     pub const WATCHLIST_CONFLICT: &str = "WATCHLIST_CONFLICT";
     pub const WATCHLIST_OPERATION_REUSED: &str = "WATCHLIST_OPERATION_REUSED";
 }
@@ -77,6 +82,19 @@ impl CommandError {
 
     pub fn hint(&self) -> Option<&str> {
         self.hint.as_deref()
+    }
+}
+
+/// 错误值的字符串视图就是它的 `message`。
+///
+/// 迁移期不少代码把错误当字符串用（`err.to_ascii_lowercase()`、传 `&str` 参数、
+/// `err.contains("...")` 断言）。Deref 到 `str` 让这些用法继续成立，
+/// 同时不改变序列化契约（前端仍拿到 `{ code, message, ... }`）。
+impl std::ops::Deref for CommandError {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.message
     }
 }
 
@@ -142,15 +160,6 @@ impl From<rusqlite::Error> for CommandError {
 impl From<serde_json::Error> for CommandError {
     fn from(error: serde_json::Error) -> Self {
         Self::new(codes::WATCHLIST_INPUT, error.to_string())
-    }
-}
-
-#[cfg(test)]
-impl CommandError {
-    /// 测试断言便利方法：迁移期大量旧断言是 `err.contains("...")`，
-    /// 保持它们可读，同时不把字符串匹配暴露成生产 API。
-    pub(crate) fn contains(&self, needle: &str) -> bool {
-        self.message.contains(needle)
     }
 }
 

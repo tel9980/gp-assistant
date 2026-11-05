@@ -3333,7 +3333,10 @@ fn retry_with_attempts_retries_transient_failures() {
     let result = retry_with_attempts(3, 0, |_| {
         attempts += 1;
         if attempts < 2 {
-            Err("transient write failure".to_string())
+            Err(crate::error::CommandError::new(
+                crate::error::codes::MARKET_IO,
+                "transient write failure",
+            ))
         } else {
             Ok("ok")
         }
@@ -4668,7 +4671,11 @@ fn real_cached_adaptive_screen_smoke_uses_tencent_history() {
         |code, start_date| {
             let code = code.to_string();
             let start_date = start_date.to_string();
-            async move { fetch_observe_daily_history(&code, &start_date, "20501231").await }
+            async move {
+                fetch_observe_daily_history(&code, &start_date, "20501231")
+                    .await
+                    .map_err(String::from)
+            }
         },
         |_, _| {},
     ));

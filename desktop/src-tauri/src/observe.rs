@@ -861,9 +861,9 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
                 ));
                 fields.extend(snapshot_fields);
             }
-            Err(error) => notes.push(error),
+            Err(error) => notes.push(error.to_string()),
         },
-        Err(error) => notes.push(error),
+        Err(error) => notes.push(error.to_string()),
     }
     match balance {
         Ok(value) => {
@@ -879,7 +879,7 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
                 fields.insert("goodwill_period".to_string(), json!(period));
             }
         }
-        Err(error) => notes.push(error),
+        Err(error) => notes.push(error.to_string()),
     }
     match pledge {
         Ok(value) => {
@@ -895,7 +895,7 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
                 fields.insert("pledged_share_period".to_string(), json!(period));
             }
         }
-        Err(error) => notes.push(error),
+        Err(error) => notes.push(error.to_string()),
     }
     match dividend {
         Ok(value) => {
@@ -913,7 +913,7 @@ pub(crate) async fn fetch_observe_fundamental_supplement(
                 fields.insert("dividend_period".to_string(), json!(period));
             }
         }
-        Err(error) => notes.push(error),
+        Err(error) => notes.push(error.to_string()),
     }
     if fields.is_empty() {
         return Err(if notes.is_empty() {

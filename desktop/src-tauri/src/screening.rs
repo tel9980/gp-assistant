@@ -1432,6 +1432,7 @@ pub(crate) async fn prepare_adaptive_screen(
                                 "20501231",
                             )
                             .await
+                            .map_err(String::from)
                         }
                     },
                     move |completed, total| {
@@ -1446,7 +1447,7 @@ pub(crate) async fn prepare_adaptive_screen(
                     },
                 )
                 .await;
-                Ok(outcome)
+                Ok::<_, String>(outcome)
             },
         )
         .await?;
@@ -1800,23 +1801,30 @@ pub(crate) async fn prepare_trend_screen(
     let fetch_missing = missing.clone();
     let fetch_outcome =
         crate::runtime::with_heavy_network_permit("api_trend_screen_history_fetch", async move {
-            Ok(collect_adaptive_history_results(
-                fetch_missing,
-                start_date,
-                Duration::from_secs(TREND_SCREEN_HISTORY_FETCH_TIMEOUT_SECS),
-                TREND_SCREEN_HISTORY_CONCURRENCY,
-                move |code, start_date| {
-                    let code = code.to_string();
-                    let start_date = start_date.to_string();
-                    let end_date = end_date.clone();
-                    async move {
-                        crate::market::fetch_observe_daily_history(&code, &start_date, &end_date)
+            Ok::<_, String>(
+                collect_adaptive_history_results(
+                    fetch_missing,
+                    start_date,
+                    Duration::from_secs(TREND_SCREEN_HISTORY_FETCH_TIMEOUT_SECS),
+                    TREND_SCREEN_HISTORY_CONCURRENCY,
+                    move |code, start_date| {
+                        let code = code.to_string();
+                        let start_date = start_date.to_string();
+                        let end_date = end_date.clone();
+                        async move {
+                            crate::market::fetch_observe_daily_history(
+                                &code,
+                                &start_date,
+                                &end_date,
+                            )
                             .await
-                    }
-                },
-                |_, _| {},
+                            .map_err(String::from)
+                        }
+                    },
+                    |_, _| {},
+                )
+                .await,
             )
-            .await)
         })
         .await?;
     let AdaptiveHistoryFetchOutcome {
@@ -2044,14 +2052,15 @@ pub(crate) async fn prepare_backtest(
                             &start_date,
                             &end_date,
                         )
-                        .await;
+                        .await
+                        .map_err(String::from);
                         (code, result)
                     }
                 })
                 .buffer_unordered(BACKTEST_HISTORY_CONCURRENCY)
                 .collect::<Vec<_>>()
                 .await;
-            Ok(results)
+            Ok::<_, String>(results)
         })
         .await?;
 
