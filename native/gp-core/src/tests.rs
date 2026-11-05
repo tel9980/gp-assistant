@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 fn adaptive_history(base: f64, slope: f64, bars: usize) -> Vec<HistoryBar> {
     (0..bars)
