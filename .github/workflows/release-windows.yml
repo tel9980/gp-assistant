@@ -64,11 +64,23 @@ jobs:
           "path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
           "name=$($exe.Name)" >> $env:GITHUB_OUTPUT
 
+      # NSIS 产物名来自 productName「股选优」，非 ASCII 会被清成空中缀（_0.6.3_x64-setup.exe）
+      # 这里统一改成与历史发布一致的 guxuanyou_<version>_windows_x64_setup.exe
+      - name: Normalize installer name
+        id: rename
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          $dest = Join-Path "desktop/src-tauri/target/release/bundle/nsis" "guxuanyou_${version}_windows_x64_setup.exe"
+          Copy-Item -LiteralPath "${{ steps.locate.outputs.path }}" -Destination $dest -Force
+          "path=$dest" >> $env:GITHUB_OUTPUT
+          "name=$(Split-Path $dest -Leaf)" >> $env:GITHUB_OUTPUT
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          path: ${{ steps.locate.outputs.path }}
+          path: ${{ steps.rename.outputs.path }}
           if-no-files-found: error
 
       - name: Resolve tag
@@ -85,7 +97,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.tag.outputs.tag }}"
-          $exe = "${{ steps.locate.outputs.path }}"
+          $exe = "${{ steps.rename.outputs.path }}"
           gh release view $tag 2>$null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title "股选优 $tag" --notes "CI 构建（commit ${{ github.sha }}）。安装包未做 Authenticode 签名。" --prerelease

@@ -230,6 +230,8 @@ npm run test:fast   # 两段式，约 18s（推荐日常用）
 两段式的由来、跨文件污染的根因与测试文件写作约束见
 [docs/frontend-testing.md](docs/frontend-testing.md)。
 
+CI 构建与发布（Windows 安装包 / 评测镜像）见 [docs/ci-release.md](docs/ci-release.md)。
+
 运行 Rust 测试：
 
 ```powershell
