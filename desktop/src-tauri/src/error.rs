@@ -71,12 +71,6 @@ impl CommandError {
     pub fn hint(&self) -> Option<&str> {
         self.hint.as_deref()
     }
-
-    /// 旧代码里 `format!(...)` 生成的是 `String`，迁移期统一从这里进来：
-    /// 保留原文，只补一个域级错误码。
-    pub fn from_message(code: &'static str, message: String) -> Self {
-        Self::new(code, message)
-    }
 }
 
 impl fmt::Display for CommandError {

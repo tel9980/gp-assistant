@@ -1,4 +1,5 @@
 import type { WatchlistItem } from "../types";
+import { errorMessage } from "./appError";
 import { buildNewsRagRequest } from "./contracts";
 import { normalizeStockCode } from "./format";
 import { postJson } from "./tauri";
@@ -34,7 +35,7 @@ export async function refreshResearchWatchlist(
       if (signal?.aborted) break;
       result.failed.push({
         code,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }

@@ -1,4 +1,5 @@
 import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+import { errorMessage } from "./appError";
 import { isTauriRuntime } from "./tauri";
 import { migrateWorkspaceLegacy, validateWorkspaceValues, workspaceValue, WORKSPACE_DEBOUNCE_MS, WORKSPACE_SCHEMA, type LegacyStorage } from "./workspaceSchema";
 export interface WorkspaceSnapshot { schemaVersion: number; revision: number; values: Record<string, unknown>; }
@@ -17,7 +18,7 @@ export function createWorkspaceStore(transport: WorkspaceTransport, legacy?: Leg
   let timer: ReturnType<typeof setTimeout> | undefined;
   const emit = () => { for (const listener of listeners) listener(); };
   const report = (state: WorkspaceStatus["state"], error?: string) => { status = { state, ready, ...(error ? { error } : {}) }; emit(); };
-  const fail = (error: unknown) => report("error", error instanceof Error ? error.message : String(error));
+  const fail = (error: unknown) => report("error", errorMessage(error));
   const clearTimer = () => { if (timer) clearTimeout(timer); timer = undefined; };
   const schedule = () => {
     clearTimer();

@@ -1,3 +1,4 @@
+import { errorMessage } from "./appError";
 export type PerfFlow = "observe" | "screening";
 
 export type PerfStage =
@@ -109,7 +110,7 @@ export function objectRecordCount(value: unknown): number | undefined {
 }
 
 export function perfOutcomeForError(error: unknown): "error" | "timeout" {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return /timeout|timed out|time out|超时|超过.{0,16}秒/i.test(message) ? "timeout" : "error";
 }
 

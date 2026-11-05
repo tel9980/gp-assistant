@@ -1,4 +1,5 @@
 import { formatLocalDataError, localDataSummary, localDataUnavailable } from "../../lib/localData";
+import { errorMessage } from "../../lib/appError";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AdaptiveScreenRequest,
@@ -116,7 +117,7 @@ export function resetScreenRefreshForTests(): void {
 }
 
 function shouldPrepareResearchDataForRetry(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   return message.includes("本地数据不足")
     || message.includes("市场状态数据不足")
     || message.includes("历史数据不足");

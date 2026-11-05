@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { errorMessage } from "./lib/appError";
 import { useTheme } from "./hooks/useTheme";
 import { useDensity } from "./hooks/useDensity";
 import { useFontScale } from "./hooks/useFontScale";
@@ -185,7 +186,7 @@ export default function App({ onMounted }: AppProps) {
       })
       .catch((error) => {
         if (cancelled || !shouldApplyMarketCapabilities(market, marketRef.current, requestId, marketCapabilitiesRequestIdRef.current)) return;
-        setMarketCapabilityError(error instanceof Error ? error.message : String(error));
+        setMarketCapabilityError(errorMessage(error));
       });
     return () => { cancelled = true; };
   }, [market, marketStatus?.quote_generated_at, marketStatus?.universe_updated_at]);

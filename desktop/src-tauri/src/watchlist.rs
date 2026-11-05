@@ -349,10 +349,10 @@ fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, Com
         || request.operation_id.len() > 200
         || request.expected_revision < 0
     {
-        return Err(
-            "watchlist operationId (1..200 bytes) and nonnegative expectedRevision are required"
-                .to_string(),
-        );
+        return Err(CommandError::new(
+            codes::WATCHLIST_INPUT,
+            "watchlist operationId (1..200 bytes) and nonnegative expectedRevision are required",
+        ));
     }
     let encoded = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let tx = conn
@@ -375,7 +375,8 @@ fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, Com
         }
         // Check duplicate BEFORE revision. A lost acknowledgement must be
         // retryable even after other writers have advanced the database.
-        return serde_json::from_str(&response).map_err(|e| e.to_string());
+        return serde_json::from_str(&response)
+            .map_err(|e| CommandError::new(codes::WATCHLIST_INTERNAL, e.to_string()));
     }
     let revision: i64 = tx
         .query_row(
@@ -536,13 +537,13 @@ mod reliability_tests {
         assert_eq!(second_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(mutate_watchlist(&mut conn, &first).unwrap(), first_result);
         assert_eq!(watchlist_snapshot(&mut conn).unwrap()["revision"], 2);
-        assert!(
+        assert_eq!(
             mutate_watchlist(&mut conn, &add("three", 0, "000003.SZ"))
                 .unwrap_err()
                 .code(),
             "WATCHLIST_CONFLICT"
         );
-        assert!(
+        assert_eq!(
             mutate_watchlist(&mut conn, &add("one", 0, "000003.SZ"))
                 .unwrap_err()
                 .code(),
@@ -672,7 +673,7 @@ mod reliability_tests {
         let state = watchlist_snapshot(&mut conn).unwrap();
         assert_eq!(state["revision"], 1);
         assert_eq!(state["migrationComplete"], true);
-        assert!(
+        assert_eq!(
             mutate_watchlist(&mut conn, &add("stale", 0, "000001.SZ"))
                 .unwrap_err()
                 .code(),
@@ -755,7 +756,7 @@ mod reliability_tests {
             .collect();
         let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-        assert!(
+        assert_eq!(
             results
                 .iter()
                 .find_map(|r| r.as_ref().err())

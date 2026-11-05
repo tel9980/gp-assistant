@@ -1,3 +1,4 @@
+import { toAppError } from "./appError";
 import type { DataStatus } from "../types";
 /** Additive metadata: never replace missing data with a successful-looking result. */
 export type DataPolicy = "cache_only" | "refresh";
@@ -36,9 +37,17 @@ export function shouldSuggestLocalRefresh(error: unknown): boolean {
   return false;
 }
 export function formatLocalDataError(error: unknown): string {
-  const text = error instanceof Error ? error.message : String(error);
+  const app = toAppError(error);
+  const text = app.message;
+  // 结构化错误把细节放在 details 里；旧式错误仍是 JSON 字符串。
+  const parsed = ((): Record<string, unknown> | null => {
+    if (app.details && typeof app.details === "object") {
+      return { ...(app.details as Record<string, unknown>), code: app.code };
+    }
+    try { return JSON.parse(text); } catch { return null; }
+  })();
   try {
-    const parsed = JSON.parse(text);
+    if (!parsed) throw new Error("not json");
     if (parsed.code === "LOCAL_DATA_MISSING") {
       const date = (value: unknown) => String(value ?? "未知").replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
       const details = (Array.isArray(parsed.missing) ? parsed.missing : []).slice(0, 5).map((item: Record<string, unknown>) => {

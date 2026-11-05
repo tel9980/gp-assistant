@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorMessage } from "../lib/appError";
 import { postJson } from "../lib/tauri";
 import type { LlmClientConfig } from "../types";
 import type { SentimentAnalysis, SentimentFollowup, SentimentRun, SentimentSnapshot } from "../types/sentiment";
 
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const message = (error: unknown) => errorMessage(error);
 
 export function useSentiment(code: string, watchlistCodes: readonly string[] = []) {
   const [snapshot, setSnapshot] = useState<SentimentSnapshot | null>(null);

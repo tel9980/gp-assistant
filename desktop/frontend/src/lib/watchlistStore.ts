@@ -113,7 +113,7 @@ function initialize(localSnapshot = loadLocalWatchlistSnapshot()): void {
     migrationItems = normalizeWatchlist(saved.migrationItems);
     pending = saved.pending;
   } catch (error) {
-    outboxError = String(error);
+    outboxError = errorMessage(error);
     publish("error", outboxError);
   }
 }
