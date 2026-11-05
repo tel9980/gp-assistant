@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::research;
 use base64::{engine::general_purpose, Engine as _};
 use futures::StreamExt;
@@ -24,6 +25,11 @@ const MAX_PDF_OBJECT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PDF_PAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::RESEARCH_IMPORT_INTERNAL, message.to_string())
+}
+
 #[derive(Debug)]
 struct PdfExtraction {
     documents: Vec<Value>,
@@ -37,20 +43,21 @@ impl PdfExtraction {
     }
 }
 
-pub(crate) async fn import_url(app: &tauri::AppHandle, payload: &Value) -> Result<Value, String> {
+pub(crate) async fn import_url(
+    app: &tauri::AppHandle,
+    payload: &Value,
+) -> Result<Value, CommandError> {
     let raw_url = payload
         .get("url")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "url is required".to_string())?;
-    let mut url = Url::parse(raw_url).map_err(|error| format!("invalid URL: {error}"))?;
+        .ok_or_else(|| ce("url is required"))?;
+    let mut url = Url::parse(raw_url).map_err(|error| ce(format!("invalid URL: {error}")))?;
 
     for redirect_index in 0..=MAX_REDIRECTS {
         let addresses = resolve_public_https_url(&url).await?;
-        let host = url
-            .host_str()
-            .ok_or_else(|| "URL host is required".to_string())?;
+        let host = url.host_str().ok_or_else(|| ce("URL host is required"))?;
         let client = reqwest::Client::builder()
             .redirect(Policy::none())
             .no_proxy()
@@ -58,29 +65,32 @@ pub(crate) async fn import_url(app: &tauri::AppHandle, payload: &Value) -> Resul
             .timeout(Duration::from_secs(20))
             .user_agent("GuXuanYou/0.4 research-import")
             .build()
-            .map_err(|error| format!("failed to build secure URL client: {error}"))?;
+            .map_err(|error| ce(format!("failed to build secure URL client: {error}")))?;
         let response = client
             .get(url.clone())
             .send()
             .await
-            .map_err(|error| format!("URL import request failed: {error}"))?;
+            .map_err(|error| ce(format!("URL import request failed: {error}")))?;
 
         if response.status().is_redirection() {
             if redirect_index == MAX_REDIRECTS {
-                return Err("URL import exceeded the redirect limit".to_string());
+                return Err(ce("URL import exceeded the redirect limit"));
             }
             let location = response
                 .headers()
                 .get(LOCATION)
                 .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| "URL redirect is missing a valid Location header".to_string())?;
+                .ok_or_else(|| ce("URL redirect is missing a valid Location header"))?;
             url = url
                 .join(location)
-                .map_err(|error| format!("invalid redirect URL: {error}"))?;
+                .map_err(|error| ce(format!("invalid redirect URL: {error}")))?;
             continue;
         }
         if !response.status().is_success() {
-            return Err(format!("URL import returned HTTP {}", response.status()));
+            return Err(ce(format!(
+                "URL import returned HTTP {}",
+                response.status()
+            )));
         }
         if response
             .headers()
@@ -89,7 +99,7 @@ pub(crate) async fn import_url(app: &tauri::AppHandle, payload: &Value) -> Resul
             .and_then(|value| value.parse::<usize>().ok())
             .is_some_and(|length| length > MAX_PDF_BYTES)
         {
-            return Err("URL import exceeds the 25 MB safety limit".to_string());
+            return Err(ce("URL import exceeds the 25 MB safety limit"));
         }
         let content_type = response
             .headers()
@@ -140,16 +150,16 @@ pub(crate) async fn import_url(app: &tauri::AppHandle, payload: &Value) -> Resul
             "imported": result
         }));
     }
-    Err("URL import failed before receiving a response".to_string())
+    Err(ce("URL import failed before receiving a response"))
 }
 
-pub(crate) fn import_pdf(app: &tauri::AppHandle, payload: &Value) -> Result<Value, String> {
+pub(crate) fn import_pdf(app: &tauri::AppHandle, payload: &Value) -> Result<Value, CommandError> {
     let encoded = payload
         .get("bytes_base64")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "bytes_base64 is required".to_string())?;
+        .ok_or_else(|| ce("bytes_base64 is required"))?;
     let bytes = decode_base64_with_limit(encoded, MAX_PDF_BYTES, "PDF")?;
     import_pdf_bytes(app, payload, &bytes, None)
 }
@@ -158,20 +168,20 @@ fn decode_base64_with_limit(
     encoded: &str,
     decoded_limit: usize,
     label: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CommandError> {
     let encoded_limit = decoded_limit.div_ceil(3).saturating_mul(4);
     if encoded.len() > encoded_limit {
-        return Err(format!(
+        return Err(ce(format!(
             "{label} exceeds the {decoded_limit} byte safety limit"
-        ));
+        )));
     }
     let bytes = general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|error| format!("invalid {label} base64 payload: {error}"))?;
+        .map_err(|error| ce(format!("invalid {label} base64 payload: {error}")))?;
     if bytes.len() > decoded_limit {
-        return Err(format!(
+        return Err(ce(format!(
             "{label} exceeds the {decoded_limit} byte safety limit"
-        ));
+        )));
     }
     Ok(bytes)
 }
@@ -181,7 +191,7 @@ fn import_pdf_bytes(
     payload: &Value,
     bytes: &[u8],
     source_url: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let extraction = extract_pdf_documents(payload, bytes, source_url)?;
     let page_count = extraction.page_count;
     let extracted_page_count = extraction.documents.len();
@@ -203,19 +213,19 @@ fn extract_pdf_documents(
     payload: &Value,
     bytes: &[u8],
     source_url: Option<&str>,
-) -> Result<PdfExtraction, String> {
+) -> Result<PdfExtraction, CommandError> {
     if bytes.len() > MAX_PDF_BYTES {
-        return Err("PDF exceeds the 25 MB safety limit".to_string());
+        return Err(ce("PDF exceeds the 25 MB safety limit"));
     }
     let options = LoadOptions::with_max_decompressed_size(MAX_PDF_OBJECT_BYTES);
     let document = Document::load_mem_with_options(bytes, options)
-        .map_err(|error| format!("failed to open PDF safely: {error}"))?;
+        .map_err(|error| ce(format!("failed to open PDF safely: {error}")))?;
     let pages = document.get_pages();
     if pages.len() > MAX_PDF_PAGES {
-        return Err(format!(
+        return Err(ce(format!(
             "PDF has {} pages; the limit is {MAX_PDF_PAGES}",
             pages.len()
-        ));
+        )));
     }
     let title = payload
         .get("title")
@@ -229,7 +239,7 @@ fn extract_pdf_documents(
     for page_number in pages.keys().copied() {
         let text = document
             .extract_text_with_limit(&[page_number], MAX_PDF_PAGE_BYTES)
-            .map_err(|error| format!("failed to extract PDF page {page_number}: {error}"))?;
+            .map_err(|error| ce(format!("failed to extract PDF page {page_number}: {error}")))?;
         if text.trim().is_empty() {
             skipped_pages.push(page_number);
             continue;
@@ -259,10 +269,9 @@ fn extract_pdf_documents(
         .map(Iterator::count)
         .sum::<usize>();
     if extracted_chars < 20 {
-        return Err(
-            "PDF appears to be scanned or contains no extractable text; OCR is required."
-                .to_string(),
-        );
+        return Err(ce(
+            "PDF appears to be scanned or contains no extractable text; OCR is required.",
+        ));
     }
     Ok(PdfExtraction {
         documents: extracted,
@@ -271,18 +280,16 @@ fn extract_pdf_documents(
     })
 }
 
-async fn resolve_public_https_url(url: &Url) -> Result<Vec<SocketAddr>, String> {
+async fn resolve_public_https_url(url: &Url) -> Result<Vec<SocketAddr>, CommandError> {
     validate_url_shape(url)?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| "URL host is required".to_string())?;
+    let host = url.host_str().ok_or_else(|| ce("URL host is required"))?;
     let port = url.port_or_known_default().unwrap_or(443);
     let ips = if let Ok(ip) = IpAddr::from_str(host) {
         vec![ip]
     } else {
         tokio::net::lookup_host((host, port))
             .await
-            .map_err(|error| format!("failed to resolve URL host: {error}"))?
+            .map_err(|error| ce(format!("failed to resolve URL host: {error}")))?
             .map(|address| address.ip())
             .collect::<HashSet<_>>()
             .into_iter()
@@ -295,27 +302,27 @@ async fn resolve_public_https_url(url: &Url) -> Result<Vec<SocketAddr>, String> 
         .collect())
 }
 
-fn validate_url_shape(url: &Url) -> Result<(), String> {
+fn validate_url_shape(url: &Url) -> Result<(), CommandError> {
     if url.scheme() != "https" {
-        return Err("only public HTTPS URLs can be imported".to_string());
+        return Err(ce("only public HTTPS URLs can be imported"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("URL credentials are not allowed".to_string());
+        return Err(ce("URL credentials are not allowed"));
     }
     if url.host_str().is_none() {
-        return Err("URL host is required".to_string());
+        return Err(ce("URL host is required"));
     }
     Ok(())
 }
 
-fn validate_public_ips(ips: &[IpAddr]) -> Result<(), String> {
+fn validate_public_ips(ips: &[IpAddr]) -> Result<(), CommandError> {
     if ips.is_empty() {
-        return Err("URL host did not resolve to an address".to_string());
+        return Err(ce("URL host did not resolve to an address"));
     }
     if ips.iter().any(|ip| !is_public_ip(*ip)) {
-        return Err(
-            "URL resolves to a loopback, private, link-local, or reserved address".to_string(),
-        );
+        return Err(ce(
+            "URL resolves to a loopback, private, link-local, or reserved address",
+        ));
     }
     Ok(())
 }
@@ -354,25 +361,28 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
     global_unicast && !documentation && !benchmarking && !orchid && !transition
 }
 
-async fn read_limited_body(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, String> {
+async fn read_limited_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, CommandError> {
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("failed to read URL response: {error}"))?;
+        let chunk = chunk.map_err(|error| ce(format!("failed to read URL response: {error}")))?;
         if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(format!("URL response exceeds the {} byte limit", limit));
+            return Err(ce(format!("URL response exceeds the {} byte limit", limit)));
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
 }
 
-fn extract_html_text(html: &str) -> Result<(String, String), String> {
+fn extract_html_text(html: &str) -> Result<(String, String), CommandError> {
     let document = Html::parse_document(html);
     let title_selector =
-        Selector::parse("title").map_err(|error| format!("invalid title selector: {error}"))?;
+        Selector::parse("title").map_err(|error| ce(format!("invalid title selector: {error}")))?;
     let content_selector = Selector::parse("article, main, h1, h2, h3, p, li, td, blockquote")
-        .map_err(|error| format!("invalid content selector: {error}"))?;
+        .map_err(|error| ce(format!("invalid content selector: {error}")))?;
     let title = document
         .select(&title_selector)
         .next()
@@ -389,7 +399,7 @@ fn extract_html_text(html: &str) -> Result<(String, String), String> {
         .collect::<Vec<_>>()
         .join("\n");
     if content.chars().count() < 20 {
-        return Err("URL page contains too little extractable article text".to_string());
+        return Err(ce("URL page contains too little extractable article text"));
     }
     Ok((title, content))
 }
@@ -554,11 +564,11 @@ mod tests {
 pub(crate) async fn api_research_import_url(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     #[cfg(mobile)]
     {
         let _ = (app, payload);
-        Err("URL research import is only available on desktop".to_string())
+        Err(ce("URL research import is only available on desktop"))
     }
     #[cfg(not(mobile))]
     {
@@ -576,11 +586,11 @@ pub(crate) async fn api_research_import_url(
 pub(crate) async fn api_research_import_pdf(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     #[cfg(mobile)]
     {
         let _ = (app, payload);
-        Err("PDF research import is only available on desktop".to_string())
+        Err(ce("PDF research import is only available on desktop"))
     }
     #[cfg(not(mobile))]
     {

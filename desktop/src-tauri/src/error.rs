@@ -58,6 +58,9 @@ pub mod codes {
     pub const PROMPT_UPGRADE_INTERNAL: &str = "prompt_upgrade.internal";
     pub const RESEARCH_RECOVERY_INTERNAL: &str = "research_recovery.internal";
     pub const NEWS_RAG_INTERNAL: &str = "news_rag.internal";
+    pub const DIAGNOSTICS_INTERNAL: &str = "diagnostics.internal";
+    pub const RESEARCH_IMPORT_INTERNAL: &str = "research_import.internal";
+    pub const AGENT_HARNESS_INTERNAL: &str = "agent_harness.internal";
 
     /// 后台任务调度（jobs）。
     pub const JOBS_IO: &str = "jobs.io";

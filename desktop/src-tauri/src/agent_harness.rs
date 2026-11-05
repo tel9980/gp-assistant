@@ -1,4 +1,4 @@
-#[cfg(test)]
+use crate::error::{codes, CommandError};
 use crate::{market::build_http_client_with_proxy, runtime};
 #[cfg(test)]
 use futures::StreamExt;
@@ -37,7 +37,11 @@ const MAX_SECRET_REDACTION_PASSES: usize = 32;
 const MAX_REDACTION_SECRETS: usize = 128;
 const MAX_REDACTION_SECRET_BYTES: usize = 16 * 1024;
 
-#[cfg(test)]
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::AGENT_HARNESS_INTERNAL, message.to_string())
+}
+
 struct PromptProfile {
     id: &'static str,
     instructions: &'static str,
@@ -170,23 +174,22 @@ pub(crate) fn merge_model_response(
     model_response: &Value,
     profile_id: &str,
     model_name: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if contains_forbidden_model_instruction(model_response) {
-        return Err(
-            "agent model response contains a prohibited trading or manipulation instruction"
-                .to_string(),
-        );
+        return Err(ce(
+            "agent model response contains a prohibited trading or manipulation instruction",
+        ));
     }
     let evidence_count = build_evidence_catalog(&tool_response).len();
     let target = tool_response
         .as_object_mut()
-        .ok_or_else(|| "agent tool response must be an object".to_string())?;
+        .ok_or_else(|| ce("agent tool response must be an object"))?;
     let raw_reply = model_response
         .get("reply")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "agent model response is missing reply".to_string())?;
+        .ok_or_else(|| ce("agent model response is missing reply"))?;
     let tool_reply = target
         .get("reply")
         .and_then(Value::as_str)
@@ -265,7 +268,10 @@ pub(crate) fn merge_model_response(
 }
 
 #[cfg(test)]
-pub(crate) async fn execute(payload: Value, data: Value) -> Result<AgentHarnessOutcome, String> {
+pub(crate) async fn execute(
+    payload: Value,
+    data: Value,
+) -> Result<AgentHarnessOutcome, CommandError> {
     execute_with_event_sink(payload, data, |_| {}).await
 }
 
@@ -285,12 +291,12 @@ impl std::io::Write for EncodedByteCounter {
     }
 }
 
-pub(crate) fn validate_payload(payload: &Value) -> Result<(), String> {
+pub(crate) fn validate_payload(payload: &Value) -> Result<(), CommandError> {
     let mut payload_bytes = EncodedByteCounter(0);
     serde_json::to_writer(&mut payload_bytes, payload)
-        .map_err(|error| format!("serialize Agent payload failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize Agent payload failed: {error}")))?;
     if payload_bytes.0 > MAX_HARNESS_PAYLOAD_BYTES {
-        return Err("Agent payload exceeds 512 KiB".to_string());
+        return Err(ce("Agent payload exceeds 512 KiB"));
     }
     let message = payload
         .get("message")
@@ -298,12 +304,12 @@ pub(crate) fn validate_payload(payload: &Value) -> Result<(), String> {
         .unwrap_or_default()
         .trim();
     if message.is_empty() {
-        return Err("Agent message is required".to_string());
+        return Err(ce("Agent message is required"));
     }
     if message.chars().count() > MAX_MESSAGE_CHARS {
-        return Err(format!(
+        return Err(ce(format!(
             "Agent message exceeds the {MAX_MESSAGE_CHARS} character limit"
-        ));
+        )));
     }
     Ok(())
 }
@@ -313,7 +319,7 @@ pub(crate) async fn execute_with_event_sink<F>(
     payload: Value,
     data: Value,
     mut sink: F,
-) -> Result<AgentHarnessOutcome, String>
+) -> Result<AgentHarnessOutcome, CommandError>
 where
     F: FnMut(Value) + Send,
 {
@@ -1201,11 +1207,11 @@ fn format_reqwest_error(context: &str, error: reqwest::Error) -> String {
 pub(crate) async fn call_model(
     llm_value: Option<&Value>,
     preview: &Value,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, CommandError> {
     let config = resolve_llm_config(llm_value);
     call_model_with_config(config.as_ref(), preview)
         .await
-        .map_err(|error| error.message)
+        .map_err(|failure| ce(failure.message))
 }
 
 #[cfg(test)]
@@ -1252,7 +1258,7 @@ async fn call_model_with_config(
 
     match post_model_request(&client, &config, &request)
         .await
-        .map_err(ModelCallFailure::classify)
+        .map_err(|error| ModelCallFailure::classify(error.to_string()))
     {
         Ok(value) => Ok(Some(value)),
         Err(first_error)
@@ -1265,7 +1271,7 @@ async fn call_model_with_config(
                 .await
                 .map(Some)
                 .map_err(|second_error| {
-                    let second_error = ModelCallFailure::classify(second_error);
+                    let second_error = ModelCallFailure::classify(second_error.to_string());
                     ModelCallFailure {
                         outcome: second_error.outcome,
                         message: format!(
@@ -1346,35 +1352,35 @@ fn config_string(value: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-fn validate_llm_config(config: &LlmConfig) -> Result<(), String> {
+fn validate_llm_config(config: &LlmConfig) -> Result<(), CommandError> {
     if config.base_url.len() > 2_048 {
-        return Err("Agent LLM base URL exceeds 2048 bytes".to_string());
+        return Err(ce("Agent LLM base URL exceeds 2048 bytes"));
     }
     if config.model.chars().count() > 200 {
-        return Err("Agent LLM model name exceeds 200 characters".to_string());
+        return Err(ce("Agent LLM model name exceeds 200 characters"));
     }
     if config.api_key.len() > 8_192 {
-        return Err("Agent LLM API key exceeds 8192 bytes".to_string());
+        return Err(ce("Agent LLM API key exceeds 8192 bytes"));
     }
     if config
         .custom_user_agent
         .as_ref()
         .is_some_and(|value| value.len() > 256 || value.contains(['\r', '\n']))
     {
-        return Err("Agent LLM custom User-Agent is invalid".to_string());
+        return Err(ce("Agent LLM custom User-Agent is invalid"));
     }
     let url = reqwest::Url::parse(&config.base_url)
-        .map_err(|error| format!("Agent LLM base URL is invalid: {error}"))?;
+        .map_err(|error| ce(format!("Agent LLM base URL is invalid: {error}")))?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err("Agent LLM base URL must use http or https".to_string());
+        return Err(ce("Agent LLM base URL must use http or https"));
     }
     if url.scheme() == "http" && !is_loopback_or_private_network_host(url.host_str()) {
-        return Err(
-            "Agent LLM remote endpoints must use https; http is limited to loopback or private LAN IP addresses".to_string(),
-        );
+        return Err(ce(
+            "Agent LLM remote endpoints must use https; http is limited to loopback or private LAN IP addresses",
+        ));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("Agent LLM base URL must not contain credentials".to_string());
+        return Err(ce("Agent LLM base URL must not contain credentials"));
     }
     Ok(())
 }
@@ -1417,18 +1423,18 @@ async fn post_model_request(
     client: &reqwest::Client,
     config: &LlmConfig,
     request: &Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let endpoint = crate::llm::llm_inference_endpoint(
         &config.base_url,
         &config.api_format,
         config.endpoint_mode == "full_url",
     )
-    .map_err(|error| format!("Agent LLM endpoint is invalid: {error}"))?;
+    .map_err(|error| ce(format!("Agent LLM endpoint is invalid: {error}")))?;
     let outbound_request = adapt_llm_request(request, &config.api_format);
     let body = serde_json::to_vec(&outbound_request)
-        .map_err(|error| format!("serialize Agent LLM request failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize Agent LLM request failed: {error}")))?;
     if body.len() > MAX_MODEL_REQUEST_BYTES {
-        return Err("Agent LLM request exceeds 2 MiB".to_string());
+        return Err(ce("Agent LLM request exceeds 2 MiB"));
     }
     let mut builder = client
         .post(endpoint)
@@ -1457,7 +1463,7 @@ async fn post_model_request(
         .content_length()
         .is_some_and(|bytes| bytes > MAX_MODEL_RESPONSE_BYTES as u64)
     {
-        return Err("Agent LLM response exceeds 2 MiB".to_string());
+        return Err(ce("Agent LLM response exceeds 2 MiB"));
     }
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
@@ -1465,21 +1471,21 @@ async fn post_model_request(
         let chunk =
             chunk.map_err(|error| format_reqwest_error("read Agent LLM response failed", error))?;
         if body.len().saturating_add(chunk.len()) > MAX_MODEL_RESPONSE_BYTES {
-            return Err("Agent LLM response exceeds 2 MiB".to_string());
+            return Err(ce("Agent LLM response exceeds 2 MiB"));
         }
         body.extend_from_slice(&chunk);
     }
     let text = String::from_utf8_lossy(&body).into_owned();
     if !status.is_success() {
-        return Err(format!(
+        return Err(ce(format!(
             "Agent LLM HTTP {status}: {}",
             limit_chars(&text, 300)
-        ));
+        )));
     }
     let envelope: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("parse Agent LLM envelope failed: {error}"))?;
+        .map_err(|error| ce(format!("parse Agent LLM envelope failed: {error}")))?;
     let content = llm_response_content(&envelope, &config.api_format)
-        .ok_or_else(|| "Agent LLM response is missing generated text".to_string())?;
+        .ok_or_else(|| ce("Agent LLM response is missing generated text"))?;
     parse_model_json(content)
 }
 
@@ -1571,7 +1577,7 @@ fn llm_response_content<'a>(envelope: &'a Value, api_format: &str) -> Option<&'a
 }
 
 #[cfg(test)]
-fn parse_model_json(content: &str) -> Result<Value, String> {
+fn parse_model_json(content: &str) -> Result<Value, CommandError> {
     let trimmed = content.trim();
     let unwrapped = trimmed
         .strip_prefix("```json")
@@ -1580,10 +1586,10 @@ fn parse_model_json(content: &str) -> Result<Value, String> {
         .map(str::trim)
         .unwrap_or(trimmed);
     serde_json::from_str(unwrapped).map_err(|error| {
-        format!(
+        ce(format!(
             "parse Agent model JSON failed: {error}: {}",
             limit_chars(unwrapped, 200)
-        )
+        ))
     })
 }
 
@@ -1610,19 +1616,24 @@ fn build_evidence_catalog(tool_response: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn validate_model_evidence(model_response: &Value, evidence_count: usize) -> Result<(), String> {
+fn validate_model_evidence(
+    model_response: &Value,
+    evidence_count: usize,
+) -> Result<(), CommandError> {
     if evidence_count == 0 {
-        return Err("agent model synthesis requires at least one local evidence item".to_string());
+        return Err(ce(
+            "agent model synthesis requires at least one local evidence item",
+        ));
     }
     let reply = model_response
         .get("reply")
         .and_then(Value::as_str)
         .unwrap_or_default();
     if reply.trim().is_empty() {
-        return Err("agent model synthesis is missing a reply".to_string());
+        return Err(ce("agent model synthesis is missing a reply"));
     }
     if !validate_evidence_refs(reply, evidence_count)? {
-        return Err("agent model reply is missing an evidence citation".to_string());
+        return Err(ce("agent model reply is missing an evidence citation"));
     }
     if let Some(sections) = model_response
         .get("answer_sections")
@@ -1632,8 +1643,9 @@ fn validate_model_evidence(model_response: &Value, evidence_count: usize) -> Res
             if let Some(bullets) = section.get("bullets").and_then(Value::as_array) {
                 for bullet in bullets.iter().filter_map(Value::as_str) {
                     if !validate_evidence_refs(bullet, evidence_count)? {
-                        return Err("agent model factual bullet is missing an evidence citation"
-                            .to_string());
+                        return Err(ce(
+                            "agent model factual bullet is missing an evidence citation",
+                        ));
                     }
                 }
             }
@@ -1642,7 +1654,7 @@ fn validate_model_evidence(model_response: &Value, evidence_count: usize) -> Res
     Ok(())
 }
 
-fn validate_evidence_refs(text: &str, evidence_count: usize) -> Result<bool, String> {
+fn validate_evidence_refs(text: &str, evidence_count: usize) -> Result<bool, CommandError> {
     let mut found = false;
     let mut remaining = text;
     while let Some(index) = remaining.find("[E") {
@@ -1652,14 +1664,16 @@ fn validate_evidence_refs(text: &str, evidence_count: usize) -> Result<bool, Str
             .take_while(|byte| byte.is_ascii_digit())
             .count();
         if digit_count == 0 || !suffix[digit_count..].starts_with(']') {
-            return Err("agent model evidence citation is invalid".to_string());
+            return Err(ce("agent model evidence citation is invalid"));
         }
         found = true;
         let id = suffix[..digit_count]
             .parse::<usize>()
             .map_err(|_| "agent model evidence citation is invalid".to_string())?;
         if id == 0 || id > evidence_count {
-            return Err(format!("agent model referenced unknown evidence [E{id}]"));
+            return Err(ce(format!(
+                "agent model referenced unknown evidence [E{id}]"
+            )));
         }
         remaining = &suffix[digit_count + 1..];
     }

@@ -61,6 +61,9 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 | `desktop/src-tauri/src/prompt_upgrade.rs` | `prompt_upgrade.io` / `prompt_upgrade.internal` | 提示词升级域 15 处签名 |
 | `desktop/src-tauri/src/research_recovery.rs` | `research_recovery.io` / `research_recovery.sqlite` / `research_recovery.internal` | 研究库恢复 19 处签名；快照文件读写走 io，校验走 sqlite |
 | `desktop/src-tauri/src/news_rag.rs` | `news_rag.io` / `news_rag.input` / `news_rag.internal` | 新闻 RAG 23 处签名 |
+| `desktop/src-tauri/src/diagnostics.rs` | `diagnostics.internal` | 诊断快照 14 处签名 |
+| `desktop/src-tauri/src/research_import.rs` | `research_import.internal` | 研究资料导入 12 处签名（含 URL 抓取的私网拦截） |
+| `desktop/src-tauri/src/agent_harness.rs` | `agent_harness.internal` | Agent 运行时外壳 10 处签名；`ModelCallFailure` 仍在内部流转，只在命令边界转成 `CommandError` |
 | `desktop/src-tauri/src/market.rs`（含 `observe.rs`、`screening.rs`、`jobs.rs`、`hk_market.rs`、`rig_runtime.rs`、`external_data/mod.rs` 接缝） | `market.network` / `market.provider` / `market.io` / `market.input` / `market.internal` | 行情域 72 处签名；`ce()` 按消息关键词分类到 network/provider/io/input，其余落 internal。**这是被最多模块共享的域**：`with_market_refresh_permit` / `with_heavy_network_permit` 改成泛型 `E: From<String>`，`screening.rs` 在闭包内 `.map_err(String::from)` 回到 String |
 | `desktop/src-tauri/src/research.rs`（含 `research_recovery.rs`、`jobs.rs`、`sentiment.rs` 的接缝） | `research.io` / `research.sqlite` / `research.input` / `research.not_found` / `research.index_stale` / `research.pack_invalid` / `research.internal` | 研究库 90 处签名；`research.not_found` 已接到 `NewsRagPanel`：会话不存在时从列表摘掉并提示，而不是让用户反复点「重试加载会话」 |
 

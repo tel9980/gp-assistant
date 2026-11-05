@@ -1,4 +1,5 @@
 //! Local-only operational diagnostics: no free-form event data, log messages, or automatic export.
+use crate::error::{codes, CommandError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -14,6 +15,11 @@ const MAX_STATE_BYTES: u64 = 4096;
 
 /// Deliberately a closed enum, not a string or object with caller-provided metadata.
 /// Never add questions, symbols, URLs, paths, credentials, IDs, timings or raw errors here.
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::DIAGNOSTICS_INTERNAL, message.to_string())
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OperationalEvent {
@@ -84,7 +90,7 @@ struct Diagnostics {
     closed: bool,
 }
 
-fn read_state<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+fn read_state<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, CommandError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -95,21 +101,21 @@ fn read_state<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, 
         .read_to_end(&mut bytes)
         .map_err(|_| "diagnostics_read_failed")?;
     if bytes.len() as u64 > MAX_STATE_BYTES {
-        return Err("diagnostics_state_invalid".into());
+        return Err(ce("diagnostics_state_invalid"));
     }
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|_| "diagnostics_state_invalid".into())
 }
 
-fn save_state(path: &Path, state: &impl Serialize) -> Result<(), String> {
+fn save_state(path: &Path, state: &impl Serialize) -> Result<(), CommandError> {
     let bytes = serde_json::to_vec(state).map_err(|_| "diagnostics_encode_failed")?;
     // Reuse the parent's synced atomic replacement, but never expose its path-bearing errors.
     crate::durability::atomic_write(path, &bytes).map_err(|_| "diagnostics_write_failed".into())
 }
 
 impl Diagnostics {
-    fn open(root: &Path, safe_start: bool) -> Result<Self, String> {
+    fn open(root: &Path, safe_start: bool) -> Result<Self, CommandError> {
         let preference =
             read_state::<GepaPreference>(&root.join("features.json"))?.unwrap_or_default();
         let previous_exit = match read_state::<Lifecycle>(&root.join("lifecycle.json"))? {
@@ -147,9 +153,9 @@ impl Diagnostics {
         }
         Ok(store)
     }
-    fn record(&mut self, event: OperationalEvent) -> Result<(), String> {
+    fn record(&mut self, event: OperationalEvent) -> Result<(), CommandError> {
         if self.closed {
-            return Err("diagnostics_session_closed".into());
+            return Err(ce("diagnostics_session_closed"));
         }
         let count = self.counters.entry(event).or_default();
         *count = count.saturating_add(1).min(MAX_COUNTER);
@@ -185,16 +191,16 @@ impl Diagnostics {
             dropped_events: self.dropped_events,
         }
     }
-    fn set_gepa(&mut self, preference: GepaPreference) -> Result<FeatureStatus, String> {
+    fn set_gepa(&mut self, preference: GepaPreference) -> Result<FeatureStatus, CommandError> {
         if self.closed {
-            return Err("diagnostics_session_closed".into());
+            return Err(ce("diagnostics_session_closed"));
         }
         save_state(&self.root.join("features.json"), &preference)?;
         self.preference = preference;
         self.record(OperationalEvent::GepaSettingChanged)?;
         Ok(self.feature_status())
     }
-    fn mark_clean_shutdown(&mut self) -> Result<(), String> {
+    fn mark_clean_shutdown(&mut self) -> Result<(), CommandError> {
         if self.closed {
             return Ok(());
         }
@@ -220,7 +226,9 @@ pub(crate) fn safe_start_requested<'a>(
 }
 
 static STORE: OnceLock<Mutex<Option<Diagnostics>>> = OnceLock::new();
-fn with_store<T>(f: impl FnOnce(&mut Diagnostics) -> Result<T, String>) -> Result<T, String> {
+fn with_store<T>(
+    f: impl FnOnce(&mut Diagnostics) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
     let mut guard = STORE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -230,7 +238,7 @@ fn with_store<T>(f: impl FnOnce(&mut Diagnostics) -> Result<T, String>) -> Resul
 
 /// Call once after the single-instance check, before optional jobs. Pass the app-data root.
 /// Failure leaves GEPA disabled; propagate a generic UI warning, not raw diagnostic payloads.
-pub(crate) fn init(app_data: &Path) -> Result<(), String> {
+pub(crate) fn init(app_data: &Path) -> Result<(), CommandError> {
     let mut guard = STORE
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -246,10 +254,10 @@ pub(crate) fn init(app_data: &Path) -> Result<(), String> {
 }
 
 /// Rust-only event entrypoint. Do NOT register as IPC or accept a caller-provided payload.
-pub(crate) fn record(event: OperationalEvent) -> Result<(), String> {
+pub(crate) fn record(event: OperationalEvent) -> Result<(), CommandError> {
     with_store(|store| store.record(event))
 }
-pub(crate) fn mark_clean_shutdown() -> Result<(), String> {
+pub(crate) fn mark_clean_shutdown() -> Result<(), CommandError> {
     with_store(Diagnostics::mark_clean_shutdown)
 }
 pub(crate) fn gepa_allowed() -> bool {
@@ -258,15 +266,17 @@ pub(crate) fn gepa_allowed() -> bool {
 
 // Parent registers these local commands (no native export-to-path/upload API).
 #[tauri::command]
-pub(crate) fn api_diagnostics_status() -> Result<FeatureStatus, String> {
+pub(crate) fn api_diagnostics_status() -> Result<FeatureStatus, CommandError> {
     with_store(|store| Ok(store.feature_status()))
 }
 #[tauri::command]
-pub(crate) fn api_diagnostics_preview() -> Result<DiagnosticPreview, String> {
+pub(crate) fn api_diagnostics_preview() -> Result<DiagnosticPreview, CommandError> {
     with_store(|store| Ok(store.preview()))
 }
 #[tauri::command]
-pub(crate) fn api_diagnostics_set_gepa(payload: GepaPreference) -> Result<FeatureStatus, String> {
+pub(crate) fn api_diagnostics_set_gepa(
+    payload: GepaPreference,
+) -> Result<FeatureStatus, CommandError> {
     with_store(|store| store.set_gepa(payload))
 }
 #[cfg(test)]
