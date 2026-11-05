@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use base64::{engine::general_purpose, Engine as _};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -12,6 +13,11 @@ use tauri::Manager;
 
 const RAG_PACK_FILE: &str = "rag-pack.json";
 const UPSTREAM_PACK_FILE: &str = "rag_pack.sqlite";
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::RAG_PACK_INTERNAL, message.to_string())
+}
 
 static RAG_PACK_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRagPack>>> = OnceLock::new();
 
@@ -30,7 +36,7 @@ struct IndexedRagChunk {
     terms: HashSet<String>,
 }
 
-pub(crate) fn rag_pack_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn rag_pack_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let path = rag_pack_path(&app)?;
     if !path.exists() {
         return Ok(
@@ -48,14 +54,14 @@ pub(crate) fn rag_pack_status(app: tauri::AppHandle) -> Result<Value, String> {
     }))
 }
 
-pub(crate) fn rag_pack_build(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn rag_pack_build(app: tauri::AppHandle, payload: Value) -> Result<Value, CommandError> {
     let documents = payload
         .get("documents")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     if documents.is_empty() {
-        return Err("RAG pack build requires at least one document.".to_string());
+        return Err(ce("RAG pack build requires at least one document."));
     }
     let pack_version =
         string_field(&payload, "pack_version").unwrap_or_else(|| "tauri-local".to_string());
@@ -68,7 +74,7 @@ pub(crate) fn rag_pack_build(app: tauri::AppHandle, payload: Value) -> Result<Va
 pub(crate) fn rag_pack_build_from_news_cache(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let news_path = news_cache_path(&app)?;
     let news_cache = if news_path.exists() {
         read_json_file(&news_path)?
@@ -126,7 +132,9 @@ pub(crate) fn rag_pack_build_from_news_cache(
         })
     }).collect::<Vec<_>>();
     if documents.is_empty() {
-        return Err("No news-cache items matched the RAG pack build filters.".to_string());
+        return Err(ce(
+            "No news-cache items matched the RAG pack build filters.",
+        ));
     }
     let pack_version =
         string_field(&payload, "pack_version").unwrap_or_else(|| "tauri-news-cache".to_string());
@@ -136,15 +144,15 @@ pub(crate) fn rag_pack_build_from_news_cache(
     write_rag_pack(&app, &pack_version, documents, chunks)
 }
 
-pub(crate) fn rag_pack_query(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn rag_pack_query(app: tauri::AppHandle, payload: Value) -> Result<Value, CommandError> {
     let path = rag_pack_path(&app)?;
     if !path.exists() {
-        return Err("Tauri/Rust RAG pack has not been built yet.".to_string());
+        return Err(ce("Tauri/Rust RAG pack has not been built yet."));
     }
     let pack = load_rag_pack_cache(&path)?;
     let query = string_field(&payload, "query").unwrap_or_default();
     if query.trim().is_empty() {
-        return Err("query is required.".to_string());
+        return Err(ce("query is required."));
     }
     let query_terms = tokenize(&query);
     let stock_codes = normalized_codes(payload.get("stock_codes"));
@@ -217,7 +225,7 @@ pub(crate) fn rag_pack_query(app: tauri::AppHandle, payload: Value) -> Result<Va
     }))
 }
 
-pub(crate) fn upstream_rag_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn upstream_rag_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let root = upstream_desktop_root(&app)?;
     let manifest_path = root.join("latest_manifest.json");
     if !manifest_path.exists() {
@@ -235,10 +243,10 @@ pub(crate) fn upstream_rag_build(
     app: tauri::AppHandle,
     payload: Value,
     market_data: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let code = string_field(&payload, "code")
         .and_then(|value| normalize_stock_code(&value))
-        .ok_or_else(|| "code is required.".to_string())?;
+        .ok_or_else(|| ce("code is required."))?;
     let data_until = string_field(&payload, "data_until").unwrap_or_else(|| current_stamp());
     let stock = find_stock(&market_data, &code)
         .unwrap_or_else(|| json!({"code": code, "name": code, "industry": ""}));
@@ -271,18 +279,18 @@ pub(crate) fn upstream_rag_build(
     });
     let root = upstream_desktop_root(&app)?;
     fs::create_dir_all(&root)
-        .map_err(|error| format!("create upstream RAG dir failed: {error}"))?;
+        .map_err(|error| ce(format!("create upstream RAG dir failed: {error}")))?;
     let pack_payload = json!({"schema_version": "upstream-rag-pack-tauri-v1", "source_documents": docs, "evidence_chunks": evidence_chunks, "relation_edges": relation_edges});
     let pack_bytes = serde_json::to_vec_pretty(&pack_payload)
-        .map_err(|error| format!("serialize upstream pack failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize upstream pack failed: {error}")))?;
     let sha256 = sha256_hex(&pack_bytes);
     let version = format!("{}_{}_{}", code, data_until.replace('-', ""), &sha256[..8]);
     let version_dir = root.join(sanitize_path_part(&version));
     fs::create_dir_all(&version_dir)
-        .map_err(|error| format!("create upstream version dir failed: {error}"))?;
+        .map_err(|error| ce(format!("create upstream version dir failed: {error}")))?;
     let pack_path = version_dir.join(UPSTREAM_PACK_FILE);
     fs::write(&pack_path, &pack_bytes)
-        .map_err(|error| format!("write upstream pack failed: {error}"))?;
+        .map_err(|error| ce(format!("write upstream pack failed: {error}")))?;
     let manifest = json!({
         "schema_version": "upstream-rag-pack-v1",
         "pack_version": version,
@@ -307,20 +315,20 @@ pub(crate) fn upstream_rag_build(
     fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| format!("serialize manifest failed: {error}"))?,
+            .map_err(|error| ce(format!("serialize manifest failed: {error}")))?,
     )
-    .map_err(|error| format!("write manifest failed: {error}"))?;
+    .map_err(|error| ce(format!("write manifest failed: {error}")))?;
     fs::write(
         root.join("latest_manifest.json"),
         serde_json::to_vec_pretty(&manifest)
-            .map_err(|error| format!("serialize latest manifest failed: {error}"))?,
+            .map_err(|error| ce(format!("serialize latest manifest failed: {error}")))?,
     )
-    .map_err(|error| format!("write latest manifest failed: {error}"))?;
+    .map_err(|error| ce(format!("write latest manifest failed: {error}")))?;
     fs::write(
         root.join("latest_pack_path.txt"),
         pack_path.display().to_string(),
     )
-    .map_err(|error| format!("write latest pack pointer failed: {error}"))?;
+    .map_err(|error| ce(format!("write latest pack pointer failed: {error}")))?;
     Ok(
         json!({"pack_path": pack_path.display().to_string(), "manifest_path": manifest_path.display().to_string(), "manifest": manifest, "quality": quality, "notes": ["Built Tauri/Rust upstream RAG pack without Python."]}),
     )
@@ -329,21 +337,21 @@ pub(crate) fn upstream_rag_build(
 pub(crate) fn upstream_rag_transfer_start(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let root = upstream_desktop_root(&app)?;
     let manifest_path = root.join("latest_manifest.json");
     let pack_pointer = root.join("latest_pack_path.txt");
     if !manifest_path.exists() || !pack_pointer.exists() {
-        return Err("Build an upstream RAG pack before starting transfer.".to_string());
+        return Err(ce("Build an upstream RAG pack before starting transfer."));
     }
     let manifest = read_json_file(&manifest_path)?;
     let pack_path = PathBuf::from(
         fs::read_to_string(&pack_pointer)
-            .map_err(|error| format!("read latest pack pointer failed: {error}"))?
+            .map_err(|error| ce(format!("read latest pack pointer failed: {error}")))?
             .trim(),
     );
     let pack_bytes = fs::read(&pack_path)
-        .map_err(|error| format!("read latest upstream pack failed: {error}"))?;
+        .map_err(|error| ce(format!("read latest upstream pack failed: {error}")))?;
     let ttl = int_field(&payload, "ttl_minutes", 15, 1, 60);
     let descriptor =
         json!({"manifest": manifest, "pack_base64": general_purpose::STANDARD.encode(&pack_bytes)});
@@ -360,9 +368,9 @@ pub(crate) fn upstream_rag_transfer_start(
     fs::write(
         root.join("latest_transfer.json"),
         serde_json::to_vec_pretty(&transfer)
-            .map_err(|error| format!("serialize transfer failed: {error}"))?,
+            .map_err(|error| ce(format!("serialize transfer failed: {error}")))?,
     )
-    .map_err(|error| format!("write transfer state failed: {error}"))?;
+    .map_err(|error| ce(format!("write transfer state failed: {error}")))?;
     Ok(transfer)
 }
 
@@ -371,24 +379,24 @@ fn write_rag_pack(
     pack_version: &str,
     documents: Vec<Value>,
     chunks: Vec<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let path = rag_pack_path(app)?;
     let root = path
         .parent()
-        .ok_or_else(|| "RAG pack path has no parent".to_string())?;
-    fs::create_dir_all(root).map_err(|error| format!("create RAG pack dir failed: {error}"))?;
+        .ok_or_else(|| ce("RAG pack path has no parent"))?;
+    fs::create_dir_all(root).map_err(|error| ce(format!("create RAG pack dir failed: {error}")))?;
     let content_hash = sha256_hex(
         &serde_json::to_vec(&chunks)
-            .map_err(|error| format!("serialize chunks failed: {error}"))?,
+            .map_err(|error| ce(format!("serialize chunks failed: {error}")))?,
     );
     let manifest = json!({"schema_version": "rag-pack-tauri-v1", "pack_version": pack_version, "document_count": documents.len(), "chunk_count": chunks.len(), "content_hash": content_hash, "embedding_model": "tauri-lexical", "embedding_backend": "tauri-rust", "embedding_quantization": "none", "embedding_dim": 0, "built_at": current_stamp()});
     let pack = json!({"manifest": manifest, "documents": documents, "chunks": chunks});
     fs::write(
         &path,
         serde_json::to_vec_pretty(&pack)
-            .map_err(|error| format!("serialize RAG pack failed: {error}"))?,
+            .map_err(|error| ce(format!("serialize RAG pack failed: {error}")))?,
     )
-    .map_err(|error| format!("write RAG pack failed: {error}"))?;
+    .map_err(|error| ce(format!("write RAG pack failed: {error}")))?;
     forget_rag_pack_cache(&path);
     Ok(
         json!({"path": path.display().to_string(), "document_count": manifest["document_count"], "chunk_count": manifest["chunk_count"], "content_hash": content_hash, "embedding_model": "tauri-lexical", "embedding_backend": "tauri-rust", "embedding_quantization": "none", "embedding_dim": 0, "notes": ["Built Tauri/Rust lightweight RAG pack without Python/ONNX."]}),
@@ -561,7 +569,7 @@ fn rag_file_signature(path: &Path) -> (u64, Option<u128>) {
     (bytes, modified_at_epoch_ms)
 }
 
-fn load_rag_pack_cache(path: &Path) -> Result<CachedRagPack, String> {
+fn load_rag_pack_cache(path: &Path) -> Result<CachedRagPack, CommandError> {
     let (bytes, modified_at_epoch_ms) = rag_file_signature(path);
     if let Ok(slot) = rag_pack_cache().lock() {
         if let Some(entry) = slot.get(path) {
@@ -646,40 +654,40 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn rag_pack_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn rag_pack_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("get app data dir failed: {error}"))?;
+        .map_err(|error| ce(format!("get app data dir failed: {error}")))?;
     root.push("rag");
     root.push(RAG_PACK_FILE);
     Ok(root)
 }
 
-fn upstream_desktop_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn upstream_desktop_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("get app data dir failed: {error}"))?;
+        .map_err(|error| ce(format!("get app data dir failed: {error}")))?;
     root.push("upstream_rag_desktop");
     Ok(root)
 }
 
-fn news_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn news_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("get app data dir failed: {error}"))?;
+        .map_err(|error| ce(format!("get app data dir failed: {error}")))?;
     root.push("news");
     root.push("news-cache.json");
     Ok(root)
 }
 
-fn read_json_file(path: &Path) -> Result<Value, String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("read JSON failed: {}: {error}", path.display()))?;
+fn read_json_file(path: &Path) -> Result<Value, CommandError> {
+    let bytes = fs::read(path)
+        .map_err(|error| ce(format!("read JSON failed: {}: {error}", path.display())))?;
     serde_json::from_slice(&bytes)
-        .map_err(|error| format!("parse JSON failed: {}: {error}", path.display()))
+        .map_err(|error| ce(format!("parse JSON failed: {}: {error}", path.display())))
 }
 
 fn normalized_codes(value: Option<&Value>) -> HashSet<String> {
@@ -821,12 +829,15 @@ mod tests {
 }
 
 #[tauri::command]
-pub(crate) fn api_rag_pack_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn api_rag_pack_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::rag_pack::rag_pack_status(app)
 }
 
 #[tauri::command]
-pub(crate) fn api_rag_pack_build(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_rag_pack_build(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     crate::rag_pack::rag_pack_build(app, payload)
 }
 
@@ -834,17 +845,20 @@ pub(crate) fn api_rag_pack_build(app: tauri::AppHandle, payload: Value) -> Resul
 pub(crate) fn api_rag_pack_build_from_news_cache(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::rag_pack::rag_pack_build_from_news_cache(app, payload)
 }
 
 #[tauri::command]
-pub(crate) fn api_rag_pack_query(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_rag_pack_query(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     crate::rag_pack::rag_pack_query(app, payload)
 }
 
 #[tauri::command]
-pub(crate) fn api_upstream_rag_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn api_upstream_rag_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::rag_pack::upstream_rag_status(app)
 }
 
@@ -852,7 +866,7 @@ pub(crate) fn api_upstream_rag_status(app: tauri::AppHandle) -> Result<Value, St
 pub(crate) fn api_upstream_rag_build(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let data = crate::market::cached_market_data(&app)?;
     crate::rag_pack::upstream_rag_build(app, payload, data)
 }
@@ -861,7 +875,7 @@ pub(crate) fn api_upstream_rag_build(
 pub(crate) fn api_upstream_rag_transfer_start(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::rag_pack::upstream_rag_transfer_start(app, payload)
 }
 
@@ -869,56 +883,56 @@ pub(crate) fn api_upstream_rag_transfer_start(
 pub(crate) fn core_upstream_rag_import(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let manifest_value = payload
         .get("manifest")
         .cloned()
-        .ok_or_else(|| "缺少 manifest。".to_string())?;
+        .ok_or_else(|| ce("缺少 manifest。"))?;
     let mut manifest = match manifest_value {
         Value::Object(map) => map,
-        _ => return Err("manifest 必须是 JSON 对象。".to_string()),
+        _ => return Err(ce("manifest 必须是 JSON 对象。")),
     };
     let pack_base64 = payload
         .get("pack_base64")
         .and_then(Value::as_str)
-        .ok_or_else(|| "缺少 pack_base64。".to_string())?;
+        .ok_or_else(|| ce("缺少 pack_base64。"))?;
     let pack_bytes = general_purpose::STANDARD
         .decode(pack_base64)
-        .map_err(|error| format!("RAG 包解码失败：{error}"))?;
+        .map_err(|error| ce(format!("RAG 包解码失败：{error}")))?;
 
     let expected_sha256 = manifest
         .get("sha256")
         .and_then(Value::as_str)
-        .ok_or_else(|| "manifest 缺少 sha256。".to_string())?;
+        .ok_or_else(|| ce("manifest 缺少 sha256。"))?;
     let actual_sha256 = crate::market::sha256_hex(&pack_bytes);
     if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
-        return Err(format!(
+        return Err(ce(format!(
             "RAG 包 sha256 校验失败：预期 {expected_sha256}，实际 {actual_sha256}。"
-        ));
+        )));
     }
     if let Some(expected_size) = manifest.get("file_size").and_then(Value::as_u64) {
         if expected_size != pack_bytes.len() as u64 {
-            return Err(format!(
+            return Err(ce(format!(
                 "RAG 包大小校验失败：预期 {expected_size} 字节，实际 {} 字节。",
                 pack_bytes.len()
-            ));
+            )));
         }
     }
 
     let stock_code = manifest
         .get("target_stock_code")
         .and_then(Value::as_str)
-        .ok_or_else(|| "manifest 缺少 target_stock_code。".to_string())?;
+        .ok_or_else(|| ce("manifest 缺少 target_stock_code。"))?;
     let pack_version = manifest
         .get("pack_version")
         .and_then(Value::as_str)
-        .ok_or_else(|| "manifest 缺少 pack_version。".to_string())?;
+        .ok_or_else(|| ce("manifest 缺少 pack_version。"))?;
     let stock_code_owned = stock_code.to_string();
     let pack_version_owned = pack_version.to_string();
 
     let root = upstream_rag_mobile_root(&app)?;
     let stock_dir = root.join(crate::market::sanitize_path_part(&stock_code_owned));
-    fs::create_dir_all(&stock_dir).map_err(|error| format!("创建 RAG 目录失败：{error}"))?;
+    fs::create_dir_all(&stock_dir).map_err(|error| ce(format!("创建 RAG 目录失败：{error}")))?;
 
     let version_dir = stock_dir.join(crate::market::sanitize_path_part(&pack_version_owned));
     let tmp_dir = stock_dir.join(format!(
@@ -927,13 +941,14 @@ pub(crate) fn core_upstream_rag_import(
         crate::market::epoch_millis()
     ));
     if tmp_dir.exists() {
-        fs::remove_dir_all(&tmp_dir).map_err(|error| format!("清理临时目录失败：{error}"))?;
+        fs::remove_dir_all(&tmp_dir).map_err(|error| ce(format!("清理临时目录失败：{error}")))?;
     }
-    fs::create_dir_all(&tmp_dir).map_err(|error| format!("创建临时目录失败：{error}"))?;
+    fs::create_dir_all(&tmp_dir).map_err(|error| ce(format!("创建临时目录失败：{error}")))?;
 
     let tmp_pack_path = tmp_dir.join("rag_pack.sqlite");
     let tmp_manifest_path = tmp_dir.join("manifest.json");
-    fs::write(&tmp_pack_path, &pack_bytes).map_err(|error| format!("写入 RAG 包失败：{error}"))?;
+    fs::write(&tmp_pack_path, &pack_bytes)
+        .map_err(|error| ce(format!("写入 RAG 包失败：{error}")))?;
     manifest.insert(
         "_local_pack_path".to_string(),
         json!(version_dir.join("rag_pack.sqlite").display().to_string()),
@@ -949,27 +964,28 @@ pub(crate) fn core_upstream_rag_import(
     fs::write(
         &tmp_manifest_path,
         serde_json::to_vec_pretty(&Value::Object(manifest.clone()))
-            .map_err(|error| format!("序列化 manifest 失败：{error}"))?,
+            .map_err(|error| ce(format!("序列化 manifest 失败：{error}")))?,
     )
-    .map_err(|error| format!("写入 manifest 失败：{error}"))?;
+    .map_err(|error| ce(format!("写入 manifest 失败：{error}")))?;
 
     if version_dir.exists() {
-        fs::remove_dir_all(&version_dir).map_err(|error| format!("替换旧版本目录失败：{error}"))?;
+        fs::remove_dir_all(&version_dir)
+            .map_err(|error| ce(format!("替换旧版本目录失败：{error}")))?;
     }
-    fs::rename(&tmp_dir, &version_dir).map_err(|error| format!("提交 RAG 包失败：{error}"))?;
+    fs::rename(&tmp_dir, &version_dir).map_err(|error| ce(format!("提交 RAG 包失败：{error}")))?;
 
     let current_manifest_path = stock_dir.join("current_manifest.json");
     let previous_manifest_path = stock_dir.join("previous_manifest.json");
     if current_manifest_path.exists() {
         fs::copy(&current_manifest_path, &previous_manifest_path)
-            .map_err(|error| format!("保存回滚 manifest 失败：{error}"))?;
+            .map_err(|error| ce(format!("保存回滚 manifest 失败：{error}")))?;
     }
     fs::write(
         &current_manifest_path,
         serde_json::to_vec_pretty(&Value::Object(manifest.clone()))
-            .map_err(|error| format!("序列化 current manifest 失败：{error}"))?,
+            .map_err(|error| ce(format!("序列化 current manifest 失败：{error}")))?,
     )
-    .map_err(|error| format!("更新 current manifest 失败：{error}"))?;
+    .map_err(|error| ce(format!("更新 current manifest 失败：{error}")))?;
 
     Ok(json!({
         "imported": true,
@@ -982,15 +998,15 @@ pub(crate) fn core_upstream_rag_import(
 }
 
 #[tauri::command]
-pub(crate) fn core_upstream_rag_list(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn core_upstream_rag_list(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let root = upstream_rag_mobile_root(&app)?;
     let mut packs = Vec::new();
     if root.exists() {
         for stock_entry in
-            fs::read_dir(&root).map_err(|error| format!("读取 RAG 目录失败：{error}"))?
+            fs::read_dir(&root).map_err(|error| ce(format!("读取 RAG 目录失败：{error}")))?
         {
             let stock_entry =
-                stock_entry.map_err(|error| format!("读取 RAG 子目录失败：{error}"))?;
+                stock_entry.map_err(|error| ce(format!("读取 RAG 子目录失败：{error}")))?;
             let stock_dir = stock_entry.path();
             if !stock_dir.is_dir() {
                 continue;
@@ -1005,10 +1021,10 @@ pub(crate) fn core_upstream_rag_list(app: tauri::AppHandle) -> Result<Value, Str
                             .map(str::to_string)
                     });
             for version_entry in fs::read_dir(&stock_dir)
-                .map_err(|error| format!("读取 RAG 版本目录失败：{error}"))?
+                .map_err(|error| ce(format!("读取 RAG 版本目录失败：{error}")))?
             {
                 let version_entry =
-                    version_entry.map_err(|error| format!("读取 RAG 版本失败：{error}"))?;
+                    version_entry.map_err(|error| ce(format!("读取 RAG 版本失败：{error}")))?;
                 let version_dir = version_entry.path();
                 if !version_dir.is_dir() {
                     continue;
@@ -1048,7 +1064,7 @@ pub(crate) fn core_upstream_rag_list(app: tauri::AppHandle) -> Result<Value, Str
 pub(crate) fn core_upstream_rag_detail(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let root = upstream_rag_mobile_root(&app)?;
     let stock_code = payload
         .get("stock_code")
@@ -1067,7 +1083,7 @@ pub(crate) fn core_upstream_rag_detail(
             .join("current_manifest.json")
     } else {
         crate::market::find_first_current_manifest(&root)
-            .ok_or_else(|| "安卓端尚未导入上下游 RAG 包。".to_string())?
+            .ok_or_else(|| ce("安卓端尚未导入上下游 RAG 包。"))?
     };
     let manifest = crate::market::read_json_file(&manifest_path)?;
     Ok(json!({
@@ -1080,26 +1096,26 @@ pub(crate) fn core_upstream_rag_detail(
 pub(crate) fn core_upstream_rag_rollback(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let root = upstream_rag_mobile_root(&app)?;
     let stock_code = payload
         .get("stock_code")
         .and_then(Value::as_str)
-        .ok_or_else(|| "缺少 stock_code。".to_string())?;
+        .ok_or_else(|| ce("缺少 stock_code。"))?;
     let stock_dir = root.join(crate::market::sanitize_path_part(stock_code));
     let current_manifest_path = stock_dir.join("current_manifest.json");
     let previous_manifest_path = stock_dir.join("previous_manifest.json");
     if !previous_manifest_path.exists() {
-        return Err("没有可回滚的上一个 RAG 包。".to_string());
+        return Err(ce("没有可回滚的上一个 RAG 包。"));
     }
     let current_bytes = fs::read(&current_manifest_path).ok();
     let previous_bytes = fs::read(&previous_manifest_path)
-        .map_err(|error| format!("读取回滚 manifest 失败：{error}"))?;
+        .map_err(|error| ce(format!("读取回滚 manifest 失败：{error}")))?;
     fs::write(&current_manifest_path, previous_bytes)
-        .map_err(|error| format!("恢复 current manifest 失败：{error}"))?;
+        .map_err(|error| ce(format!("恢复 current manifest 失败：{error}")))?;
     if let Some(bytes) = current_bytes {
         fs::write(&previous_manifest_path, bytes)
-            .map_err(|error| format!("更新 previous manifest 失败：{error}"))?;
+            .map_err(|error| ce(format!("更新 previous manifest 失败：{error}")))?;
     }
     let manifest = crate::market::read_json_file(&current_manifest_path)?;
     Ok(json!({
@@ -1109,11 +1125,11 @@ pub(crate) fn core_upstream_rag_rollback(
     }))
 }
 
-pub(crate) fn upstream_rag_mobile_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn upstream_rag_mobile_root(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("获取应用数据目录失败：{error}"))?;
+        .map_err(|error| ce(format!("获取应用数据目录失败：{error}")))?;
     root.push("upstream_rag");
     Ok(root)
 }

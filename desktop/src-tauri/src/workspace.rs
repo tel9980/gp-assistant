@@ -1,5 +1,6 @@
 //! L3 client workspace. Register api_workspace_load/api_workspace_commit in the parent lib.rs.
 //! Only small non-secret UI state belongs here; ledgers/results/credentials have other owners.
+use crate::error::{codes, CommandError};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -26,8 +27,11 @@ pub struct WorkspaceCommit {
     expected_revision: i64,
     changes: Map<String, Value>,
 }
-fn err(error: impl std::fmt::Display) -> String {
-    format!("workspace storage: {error}")
+fn err(error: impl std::fmt::Display) -> CommandError {
+    CommandError::new(
+        codes::WORKSPACE_INTERNAL,
+        format!("workspace storage: {error}"),
+    )
 }
 fn bounded_string(value: &Value, max: usize) -> bool {
     value.as_str().is_some_and(|text| text.len() <= max)
@@ -68,7 +72,7 @@ fn valid_core_criteria(value: &Value) -> bool {
             .all(|v| v.is_null() || v.is_boolean() || v.is_number() || bounded_string(v, 256))
     })
 }
-fn validate_value(key: &str, value: &Value) -> Result<String, String> {
+fn validate_value(key: &str, value: &Value) -> Result<String, CommandError> {
     if key.len() > 280 || key.chars().any(char::is_control) {
         return Err(err("invalid key"));
     }
@@ -185,7 +189,7 @@ fn validate_value(key: &str, value: &Value) -> Result<String, String> {
     }
     Ok(json)
 }
-fn open_workspace(root: &Path) -> Result<Connection, String> {
+fn open_workspace(root: &Path) -> Result<Connection, CommandError> {
     let path = root.join("client-state.sqlite");
     let existing = path.exists();
     if existing {
@@ -242,7 +246,7 @@ fn open_workspace(root: &Path) -> Result<Connection, String> {
     }
     Ok(connection)
 }
-fn read_snapshot(connection: &mut Connection) -> Result<WorkspaceSnapshot, String> {
+fn read_snapshot(connection: &mut Connection) -> Result<WorkspaceSnapshot, CommandError> {
     let tx = connection.transaction().map_err(err)?;
     let revision: i64 = tx
         .query_row(
@@ -286,7 +290,10 @@ fn read_snapshot(connection: &mut Connection) -> Result<WorkspaceSnapshot, Strin
         values,
     })
 }
-fn commit_changes(connection: &mut Connection, payload: WorkspaceCommit) -> Result<i64, String> {
+fn commit_changes(
+    connection: &mut Connection,
+    payload: WorkspaceCommit,
+) -> Result<i64, CommandError> {
     if payload.changes.is_empty()
         || payload.changes.len() > MAX_KEYS as usize
         || !(0..MAX_REVISION).contains(&payload.expected_revision)
@@ -330,7 +337,7 @@ fn commit_changes(connection: &mut Connection, payload: WorkspaceCommit) -> Resu
     Ok(next)
 }
 #[tauri::command]
-pub async fn api_workspace_load(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, String> {
+pub async fn api_workspace_load(app: tauri::AppHandle) -> Result<WorkspaceSnapshot, CommandError> {
     let root = app.path().app_data_dir().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = WORKSPACE_OPERATION
@@ -345,7 +352,7 @@ pub async fn api_workspace_load(app: tauri::AppHandle) -> Result<WorkspaceSnapsh
 pub async fn api_workspace_commit(
     app: tauri::AppHandle,
     payload: WorkspaceCommit,
-) -> Result<i64, String> {
+) -> Result<i64, CommandError> {
     let root = app.path().app_data_dir().map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = WORKSPACE_OPERATION

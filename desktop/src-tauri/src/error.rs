@@ -61,6 +61,9 @@ pub mod codes {
     pub const DIAGNOSTICS_INTERNAL: &str = "diagnostics.internal";
     pub const RESEARCH_IMPORT_INTERNAL: &str = "research_import.internal";
     pub const AGENT_HARNESS_INTERNAL: &str = "agent_harness.internal";
+    pub const RAG_PACK_INTERNAL: &str = "rag_pack.internal";
+    pub const EVAL_REPLAY_INTERNAL: &str = "eval_replay.internal";
+    pub const WORKSPACE_INTERNAL: &str = "workspace.internal";
 
     /// 后台任务调度（jobs）。
     pub const JOBS_IO: &str = "jobs.io";

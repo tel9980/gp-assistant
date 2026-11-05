@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -12,6 +13,11 @@ use stock_optimizer_core as gp_core;
 const FIXTURE_VERSION: &str = "research-retrieval-eval-v4";
 const EMBEDDING_MODEL: &str = "retrieval-replay-v3";
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::EVAL_REPLAY_INTERNAL, message.to_string())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReplayProfile {
     Deterministic,
@@ -19,11 +25,11 @@ pub(crate) enum ReplayProfile {
 }
 
 impl ReplayProfile {
-    fn parse(value: &str) -> Result<Self, String> {
+    fn parse(value: &str) -> Result<Self, CommandError> {
         match value {
             "deterministic" | "deterministic_v1" => Ok(Self::Deterministic),
             "model-backed" | "model_backed" => Ok(Self::ModelBacked),
-            other => Err(format!("unknown replay profile: {other}")),
+            other => Err(ce(format!("unknown replay profile: {other}"))),
         }
     }
 
@@ -35,7 +41,7 @@ impl ReplayProfile {
     }
 }
 
-fn agent_model_config_from_env() -> Result<Value, String> {
+fn agent_model_config_from_env() -> Result<Value, CommandError> {
     let required = |name: &str| {
         env::var(name)
             .ok()
@@ -55,14 +61,16 @@ fn agent_model_config_from_env() -> Result<Value, String> {
         .iter()
         .any(|prefix| lowercase_key.starts_with(prefix))
     {
-        return Err("RAG_EVAL_AGENT_API_KEY is still a placeholder".to_string());
+        return Err(ce("RAG_EVAL_AGENT_API_KEY is still a placeholder"));
     }
     let temperature = env::var("RAG_EVAL_AGENT_TEMPERATURE")
         .unwrap_or_else(|_| "0".to_string())
         .parse::<f64>()
         .map_err(|_| "RAG_EVAL_AGENT_TEMPERATURE must be numeric".to_string())?;
     if temperature != 0.0 {
-        return Err("RAG_EVAL_AGENT_TEMPERATURE must be 0 for reproducible replay".to_string());
+        return Err(ce(
+            "RAG_EVAL_AGENT_TEMPERATURE must be 0 for reproducible replay",
+        ));
     }
     let api_format =
         env::var("RAG_EVAL_AGENT_API_FORMAT").unwrap_or_else(|_| "openai_chat".to_string());
@@ -159,7 +167,7 @@ fn query_vector(case: &Value) -> Option<Vec<f32>> {
         .map(vec_for)
 }
 
-fn seed_embeddings(store: &ResearchStore, docs: &[Value]) -> Result<(), String> {
+fn seed_embeddings(store: &ResearchStore, docs: &[Value]) -> Result<(), CommandError> {
     let work = store.pending_embedding_chunks(50_000)?;
     let items = work
         .into_iter()
@@ -207,7 +215,7 @@ fn replay_agent(
     response: &Value,
     profile: ReplayProfile,
     agent_config: Option<&Value>,
-) -> Result<(Vec<Value>, Value, Vec<Value>), String> {
+) -> Result<(Vec<Value>, Value, Vec<Value>), CommandError> {
     let data = serde_json::to_value(gp_core::CoreDataSet::default()).map_err(|e| e.to_string())?;
     // Expected answers/traces never enter the runtime. Only input and actual evidence do.
     let mut payload = json!({
@@ -239,11 +247,11 @@ fn replay_case(
     case: &Value,
     profile: ReplayProfile,
     agent_config: Option<&Value>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let id = case
         .get("id")
         .and_then(Value::as_str)
-        .ok_or_else(|| "case id missing".to_string())?;
+        .ok_or_else(|| ce("case id missing"))?;
     let db = temp_db(id);
     let store = ResearchStore::open(&db)?;
     let docs = fixture_documents(case);
@@ -488,28 +496,28 @@ pub(crate) fn run(
     output: &Path,
     profile: ReplayProfile,
     agent_config: Option<&Value>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let allowed = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../app/prompts/research_retrieval_eval_cases.json");
     if input.canonicalize().map_err(|e| e.to_string())?
         != allowed.canonicalize().map_err(|e| e.to_string())?
     {
-        return Err("Only the checked-in frozen fixture is allowed".to_string());
+        return Err(ce("Only the checked-in frozen fixture is allowed"));
     }
     let fixture: Value =
         serde_json::from_str(&fs::read_to_string(input).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     if fixture.get("version").and_then(Value::as_str) != Some(FIXTURE_VERSION) {
-        return Err(format!("fixture must be {FIXTURE_VERSION}"));
+        return Err(ce(format!("fixture must be {FIXTURE_VERSION}")));
     }
     let cases = fixture
         .get("cases")
         .and_then(Value::as_array)
-        .ok_or_else(|| "cases missing".to_string())?;
+        .ok_or_else(|| ce("cases missing"))?;
     if profile == ReplayProfile::ModelBacked && agent_config.is_none() {
-        return Err(
-            "model-backed replay requires explicit RAG_EVAL_AGENT_* configuration".to_string(),
-        );
+        return Err(ce(
+            "model-backed replay requires explicit RAG_EVAL_AGENT_* configuration",
+        ));
     }
     let rows = cases
         .iter()
@@ -530,13 +538,12 @@ pub(crate) fn run(
     )
 }
 
-pub fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
+pub fn cli(args: impl Iterator<Item = String>) -> Result<(), CommandError> {
     let args = args.skip(1).collect::<Vec<_>>();
     if args.len() < 2 {
-        return Err(
-            "usage: rag-replay <fixture> <output> [--profile deterministic|model-backed]"
-                .to_string(),
-        );
+        return Err(ce(
+            "usage: rag-replay <fixture> <output> [--profile deterministic|model-backed]",
+        ));
     }
     let input = PathBuf::from(&args[0]);
     let output = PathBuf::from(&args[1]);
@@ -548,10 +555,10 @@ pub fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
                 index += 1;
                 let value = args
                     .get(index)
-                    .ok_or_else(|| "--profile requires a value".to_string())?;
+                    .ok_or_else(|| ce("--profile requires a value"))?;
                 profile = ReplayProfile::parse(value)?;
             }
-            other => return Err(format!("unknown argument: {other}")),
+            other => return Err(ce(format!("unknown argument: {other}"))),
         }
         index += 1;
     }
