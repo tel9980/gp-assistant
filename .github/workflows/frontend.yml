@@ -76,7 +76,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native/gp-core
+          workspaces: |
+            native/gp-core
+            native/gp-research
 
       # gp-core 的 Tauri 依赖在 Linux 上需要这些系统库
       - name: System libs
@@ -88,6 +90,12 @@ jobs:
       - name: cargo test --lib
         working-directory: native/gp-core
         run: cargo test --lib
+
+      # gp-research 的集成测试一直没进 CI，导致 fixtures/tiny/manifest.json 里的
+      # sha256 与文件实际内容不一致两年没人发现（import 时 hash_mismatch）。
+      - name: cargo test (gp-research)
+        working-directory: native/gp-research
+        run: cargo test
 
       - name: cargo fmt --check
         working-directory: native/gp-core
@@ -137,6 +145,11 @@ jobs:
       - name: cargo check
         working-directory: desktop/src-tauri
         run: cargo check --all-targets --features gepa-lab --message-format short
+
+      # 之前 desktop 侧只跑 check 不跑测试，两个依赖 fixtures/tiny 的用例红了很久没人发现
+      - name: cargo test --lib
+        working-directory: desktop/src-tauri
+        run: cargo test --lib --features gepa-lab
 
       - name: cargo fmt --check
         working-directory: desktop/src-tauri
