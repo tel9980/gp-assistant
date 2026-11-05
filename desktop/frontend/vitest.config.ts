@@ -1,5 +1,7 @@
 import { defineConfig, mergeConfig } from "vitest/config";
-import viteConfig from "./vite.config";
+// 必须带扩展名：Windows 的 ESM 原生 config loader 无法解析省略扩展名的相对路径
+// （CI 报 ERR_MODULE_NOT_FOUND: .../desktop/frontend/vite.config）。
+import viteConfig from "./vite.config.ts";
 
 // 测试专用配置：继承 vite.config.ts（含 raf 分桶等构建/依赖优化），
 // 只补 testing 相关项。这样 `isolate` 可以用环境变量显式切换。
