@@ -32,7 +32,8 @@
     "test:desktop:built": "node ../../scripts/ui-screenshot.mjs --serve --check-only --check-search-overlay --check-news-page --check-backtest-page --check-news-interactions",
     "ui:screenshots": "node ../../scripts/ui-screenshot.mjs",
     "ui:backtest": "npm run build:app && node ../../scripts/ui-screenshot.mjs --serve --backtest-page-only --output ./test-baselines --stable-report",
-    "test:fast": "node scripts/test-fast.mjs"
+    "test:fast": "node scripts/test-fast.mjs",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
