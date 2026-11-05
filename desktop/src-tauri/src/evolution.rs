@@ -5,6 +5,25 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 use crate::agent_ledger;
+use crate::error::{codes, CommandError};
+
+/// 进化（策略/画像）模块的错误统一从这里出。
+/// 文件系统错误统一落到 evolution.io。
+fn io_error(error: std::io::Error) -> CommandError {
+    CommandError::new(codes::EVOLUTION_IO, format!("evolution io: {error}"))
+}
+
+/// rusqlite 错误统一落到 evolution.sqlite。
+fn sql_error(error: rusqlite::Error) -> CommandError {
+    CommandError::new(
+        codes::EVOLUTION_SQLITE,
+        format!("evolution sqlite: {error}"),
+    )
+}
+
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::EVOLUTION_INTERNAL, message.to_string())
+}
 
 const MAX_PROFILE_RULES: usize = 100;
 const MAX_RULE_CHARS: usize = 800;
@@ -36,11 +55,13 @@ impl Default for EvolutionSettings {
     }
 }
 
-fn evolution_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve evolution directory: {error}"))?;
+fn evolution_path(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let mut root = app.path().app_data_dir().map_err(|error| {
+        CommandError::new(
+            codes::EVOLUTION_IO,
+            format!("failed to resolve evolution directory: {error}"),
+        )
+    })?;
     root.push("evolution");
     root.push("self-evolution.sqlite");
     Ok(root)
@@ -50,22 +71,22 @@ pub(crate) struct EvolutionStore {
     connection: Connection,
 }
 
-fn schema_version(connection: &Connection) -> Result<i64, String> {
+fn schema_version(connection: &Connection) -> Result<i64, CommandError> {
     connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| error.to_string())
+        .map_err(sql_error)
 }
 
-fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
+fn initialize_schema(connection: &mut Connection) -> Result<(), CommandError> {
     let version = schema_version(connection)?;
     if version > EVOLUTION_SCHEMA_VERSION {
-        return Err(format!(
+        return Err(CommandError::new(codes::EVOLUTION_SCHEMA, format!(
             "evolution schema version {version} is newer than supported version {EVOLUTION_SCHEMA_VERSION}"
-        ));
+        )));
     }
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| error.to_string())?;
+        .map_err(sql_error)?;
     transaction
         .execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -103,28 +124,28 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
                SELECT strategy_id,version,payload_json,status,created_at FROM sentiment_strategies;
             ",
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(sql_error)?;
     transaction
         .pragma_update(None, "user_version", EVOLUTION_SCHEMA_VERSION)
-        .map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())
+        .map_err(sql_error)?;
+    transaction.commit().map_err(sql_error)
 }
 
 impl EvolutionStore {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, CommandError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(parent).map_err(io_error)?;
         }
-        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let mut connection = Connection::open(path).map_err(sql_error)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         initialize_schema(&mut connection)?;
         Ok(Self { connection })
     }
 
-    fn settings(&self) -> Result<EvolutionSettings, String> {
+    fn settings(&self) -> Result<EvolutionSettings, CommandError> {
         self.connection
             .query_row(
                 "SELECT enabled,coach_mode,local_only,review_trigger,
@@ -142,10 +163,10 @@ impl EvolutionStore {
                     })
                 },
             )
-            .map_err(|error| error.to_string())
+            .map_err(sql_error)
     }
 
-    fn update_settings(&self, value: &Value) -> Result<EvolutionSettings, String> {
+    fn update_settings(&self, value: &Value) -> Result<EvolutionSettings, CommandError> {
         let current = self.settings()?;
         let enabled = value
             .get("enabled")
@@ -161,11 +182,11 @@ impl EvolutionStore {
                  local_only=1,review_trigger='explicit',retain_raw_conversation=0 WHERE id=1",
                 params![enabled as i64, coach_mode as i64],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.settings()
     }
 
-    fn rules(&self) -> Result<Vec<Value>, String> {
+    fn rules(&self) -> Result<Vec<Value>, CommandError> {
         let mut statement = self
             .connection
             .prepare(
@@ -175,7 +196,7 @@ impl EvolutionStore {
              WHERE status != 'deleted'
              ORDER BY confirmed_at DESC LIMIT ?1",
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         let rows = statement.query_map([MAX_PROFILE_RULES as i64], |row| {
             let evidence_refs: String = row.get(4)?;
             Ok(json!({
@@ -188,24 +209,22 @@ impl EvolutionStore {
                 "version": row.get::<_, i64>(6)?,
                 "confirmed_at": row.get::<_, i64>(7)?,
             }))
-        }).map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
+        }).map_err(sql_error)?;
+        rows.map(|row| row.map_err(sql_error)).collect()
     }
 
-    fn suppressed_kinds(&self) -> Result<Vec<String>, String> {
+    fn suppressed_kinds(&self) -> Result<Vec<String>, CommandError> {
         let mut statement = self
             .connection
             .prepare("SELECT kind FROM evolution_suppressions ORDER BY created_at DESC LIMIT ?1")
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         let rows = statement
             .query_map([MAX_SUPPRESSED_KINDS as i64], |row| row.get(0))
-            .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
+            .map_err(sql_error)?;
+        rows.map(|row| row.map_err(sql_error)).collect()
     }
 
-    fn profile(&self) -> Result<Value, String> {
+    fn profile(&self) -> Result<Value, CommandError> {
         let settings = self.settings()?;
         Ok(json!({
             "settings": settings,
@@ -215,37 +234,43 @@ impl EvolutionStore {
         }))
     }
 
-    fn reset_profile(&self) -> Result<Value, String> {
+    fn reset_profile(&self) -> Result<Value, CommandError> {
         self.connection
             .execute(
                 "UPDATE evolution_rules SET status='deleted' WHERE status != 'deleted'",
                 [],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.connection
             .execute("DELETE FROM evolution_suppressions", [])
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.connection
             .execute(
                 "UPDATE evolution_settings SET profile_version=profile_version+1 WHERE id=1",
                 [],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.profile()
     }
 
-    fn confirm_rule(&self, payload: &Value) -> Result<Value, String> {
+    fn confirm_rule(&self, payload: &Value) -> Result<Value, CommandError> {
         let statement = payload
             .get("statement")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.chars().count() <= MAX_RULE_CHARS)
-            .ok_or("rule statement is empty or too long")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "rule statement is empty or too long",
+            ))?;
         let review_id = payload
             .get("source_review_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or("source_review_id is required")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "source_review_id is required",
+            ))?;
         let kind = payload
             .get("kind")
             .and_then(Value::as_str)
@@ -265,45 +290,51 @@ impl EvolutionStore {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 128)
-            .ok_or("rule_id is required")?;
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "rule_id is required",
+            ))?;
+        let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
         let version: i64 = transaction
             .query_row(
                 "SELECT profile_version+1 FROM evolution_settings WHERE id=1",
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         transaction.execute(
             "INSERT OR REPLACE INTO evolution_rules
              (rule_id,kind,statement,source_review_id,evidence_refs_json,status,version,confirmed_at)
              VALUES(?1,?2,?3,?4,?5,'active',?6,?7)",
             params![rule_id,kind,statement,review_id,evidence_refs.to_string(),version,agent_ledger::current_epoch_millis()],
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         transaction
             .execute(
                 "UPDATE evolution_settings SET profile_version=?1 WHERE id=1",
                 [version],
             )
-            .map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
         self.profile()
     }
 
-    fn edit_rule(&self, payload: &Value) -> Result<Value, String> {
+    fn edit_rule(&self, payload: &Value) -> Result<Value, CommandError> {
         let rule_id = payload
             .get("rule_id")
             .and_then(Value::as_str)
-            .ok_or("rule_id is required")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "rule_id is required",
+            ))?;
         let statement = payload
             .get("statement")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.chars().count() <= MAX_RULE_CHARS)
-            .ok_or("rule statement is empty or too long")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "rule statement is empty or too long",
+            ))?;
         let evidence_refs = payload
             .get("evidence_refs")
             .cloned()
@@ -311,21 +342,18 @@ impl EvolutionStore {
         if !evidence_refs.is_array() || evidence_refs.as_array().map_or(true, Vec::is_empty) {
             return Err("edited rules require evidence_refs".into());
         }
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+        let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
         let version: i64 = transaction
             .query_row(
                 "SELECT profile_version+1 FROM evolution_settings WHERE id=1",
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         let changed = transaction.execute(
             "UPDATE evolution_rules SET statement=?1,evidence_refs_json=?2,version=?3,confirmed_at=?4 WHERE rule_id=?5",
             params![statement,evidence_refs.to_string(),version,agent_ledger::current_epoch_millis(),rule_id],
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         if changed == 0 {
             return Err("rule not found".into());
         }
@@ -334,12 +362,12 @@ impl EvolutionStore {
                 "UPDATE evolution_settings SET profile_version=?1 WHERE id=1",
                 [version],
             )
-            .map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
         self.profile()
     }
 
-    fn set_rule_status(&self, rule_id: &str, status: &str) -> Result<Value, String> {
+    fn set_rule_status(&self, rule_id: &str, status: &str) -> Result<Value, CommandError> {
         if !matches!(status, "active" | "paused" | "never_suggested" | "deleted") {
             return Err("invalid rule status".into());
         }
@@ -348,23 +376,26 @@ impl EvolutionStore {
                 "UPDATE evolution_rules SET status=?1 WHERE rule_id=?2",
                 params![status, rule_id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.connection
             .execute(
                 "UPDATE evolution_settings SET profile_version=profile_version+1 WHERE id=1",
                 [],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.profile()
     }
 
-    fn suppress_kind(&self, payload: &Value) -> Result<Value, String> {
+    fn suppress_kind(&self, payload: &Value) -> Result<Value, CommandError> {
         let kind = payload
             .get("kind")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or("kind is required")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "kind is required",
+            ))?;
         let statement = payload
             .get("statement")
             .and_then(Value::as_str)
@@ -373,46 +404,49 @@ impl EvolutionStore {
             .get("source_review_id")
             .and_then(Value::as_str)
             .unwrap_or("");
-        self.connection.execute("INSERT OR REPLACE INTO evolution_suppressions(kind,statement,source_review_id,created_at) VALUES(?1,?2,?3,?4)", params![kind,statement,review_id,agent_ledger::current_epoch_millis()]).map_err(|error| error.to_string())?;
+        self.connection.execute("INSERT OR REPLACE INTO evolution_suppressions(kind,statement,source_review_id,created_at) VALUES(?1,?2,?3,?4)", params![kind,statement,review_id,agent_ledger::current_epoch_millis()]).map_err(sql_error)?;
         self.connection
             .execute(
                 "UPDATE evolution_settings SET profile_version=profile_version+1 WHERE id=1",
                 [],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.profile()
     }
 
-    fn unsuppress_kind(&self, kind: &str) -> Result<Value, String> {
+    fn unsuppress_kind(&self, kind: &str) -> Result<Value, CommandError> {
         self.connection
             .execute("DELETE FROM evolution_suppressions WHERE kind=?1", [kind])
-            .map_err(|error| error.to_string())?;
-        self.connection.execute("UPDATE evolution_rules SET status='active' WHERE kind=?1 AND status='never_suggested'", [kind]).map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
+        self.connection.execute("UPDATE evolution_rules SET status='active' WHERE kind=?1 AND status='never_suggested'", [kind]).map_err(sql_error)?;
         self.connection
             .execute(
                 "UPDATE evolution_settings SET profile_version=profile_version+1 WHERE id=1",
                 [],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         self.profile()
     }
 
-    fn save_review(&self, id: &str, payload: &Value) -> Result<(), String> {
-        let text = serde_json::to_string(payload).map_err(|error| error.to_string())?;
+    fn save_review(&self, id: &str, payload: &Value) -> Result<(), CommandError> {
+        let text = serde_json::to_string(payload).map_err(|error| ce(error))?;
         if text.len() > MAX_REVIEW_CHARS * 4 {
-            return Err("review payload is too large".into());
+            return Err(ce("review payload is too large"));
         }
-        self.connection.execute("INSERT OR REPLACE INTO evolution_reviews(review_id,run_id,conversation_id,status,payload_json,created_at) VALUES(?1,?2,?3,'draft',?4,?5)", params![id,payload.get("run_id").and_then(Value::as_str).unwrap_or(""),payload.get("conversation_id").and_then(Value::as_str),text,agent_ledger::current_epoch_millis()]).map_err(|error| error.to_string())?;
+        self.connection.execute("INSERT OR REPLACE INTO evolution_reviews(review_id,run_id,conversation_id,status,payload_json,created_at) VALUES(?1,?2,?3,'draft',?4,?5)", params![id,payload.get("run_id").and_then(Value::as_str).unwrap_or(""),payload.get("conversation_id").and_then(Value::as_str),text,agent_ledger::current_epoch_millis()]).map_err(sql_error)?;
         Ok(())
     }
 
-    fn save_strategy(&self, payload: &Value) -> Result<Value, String> {
+    fn save_strategy(&self, payload: &Value) -> Result<Value, CommandError> {
         let name = payload
             .get("name")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or("strategy name is required")?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "strategy name is required",
+            ))?;
         let stage = payload
             .get("stage")
             .and_then(Value::as_str)
@@ -431,7 +465,7 @@ impl EvolutionStore {
         let backtest = payload
             .get("backtest")
             .and_then(Value::as_object)
-            .ok_or("strategies require a backtest summary")?;
+            .ok_or(ce("strategies require a backtest summary"))?;
         if backtest.get("passed").and_then(Value::as_bool) != Some(true) {
             return Err("strategy backtest has not passed".into());
         }
@@ -456,7 +490,7 @@ impl EvolutionStore {
         {
             let field = change.get("field").and_then(Value::as_str).unwrap_or("");
             if !allowed.contains(&field) {
-                return Err(format!("strategy field is not allowed: {field}"));
+                return Err(ce(format!("strategy field is not allowed: {field}")));
             }
             let ratio = change
                 .get("relative_change")
@@ -471,73 +505,70 @@ impl EvolutionStore {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty() && value.len() <= 128)
-            .ok_or("strategy_id is required")?;
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+            .ok_or(CommandError::new(
+                codes::EVOLUTION_INPUT,
+                "strategy_id is required",
+            ))?;
+        let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
         let version: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(version),0)+1 FROM sentiment_strategy_versions WHERE strategy_id=?1",
             [id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         let now = agent_ledger::current_epoch_millis();
         transaction
             .execute(
                 "UPDATE sentiment_strategy_versions SET status='superseded' WHERE strategy_id=?1",
                 [id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         transaction.execute(
             "INSERT INTO sentiment_strategy_versions(strategy_id,version,payload_json,status,created_at) VALUES(?1,?2,?3,'active',?4)",
             params![id,version,payload.to_string(),now],
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         transaction.execute(
             "INSERT OR REPLACE INTO sentiment_strategies(strategy_id,name,stage,market_regime,payload_json,status,version,created_at,source_analysis_id) VALUES(?1,?2,?3,?4,?5,'active',?6,?7,?8)",
             params![id,name,stage,payload.get("market_regime").and_then(Value::as_str),payload.to_string(),version,now,payload.get("source_analysis_id").and_then(Value::as_str)],
-        ).map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
+        transaction.commit().map_err(sql_error)?;
         Ok(json!({"strategy_id":id,"version":version,"status":"active"}))
     }
 
-    fn strategies(&self) -> Result<Value, String> {
-        let mut statement = self.connection.prepare("SELECT strategy_id,name,stage,market_regime,payload_json,status,version,created_at,source_analysis_id FROM sentiment_strategies ORDER BY created_at DESC LIMIT ?1").map_err(|error| error.to_string())?;
-        let rows = statement.query_map([MAX_STRATEGIES as i64], |row| { let payload: Value = serde_json::from_str::<Value>(&row.get::<_,String>(4)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error)))?; Ok(json!({"strategy_id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"stage":row.get::<_,String>(2)?,"market_regime":row.get::<_,Option<String>>(3)?,"payload":payload,"status":row.get::<_,String>(5)?,"version":row.get::<_,i64>(6)?,"created_at":row.get::<_,i64>(7)?,"source_analysis_id":row.get::<_,Option<String>>(8)?})) }).map_err(|error| error.to_string())?;
+    fn strategies(&self) -> Result<Value, CommandError> {
+        let mut statement = self.connection.prepare("SELECT strategy_id,name,stage,market_regime,payload_json,status,version,created_at,source_analysis_id FROM sentiment_strategies ORDER BY created_at DESC LIMIT ?1").map_err(sql_error)?;
+        let rows = statement.query_map([MAX_STRATEGIES as i64], |row| { let payload: Value = serde_json::from_str::<Value>(&row.get::<_,String>(4)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(4, Type::Text, Box::new(error)))?; Ok(json!({"strategy_id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"stage":row.get::<_,String>(2)?,"market_regime":row.get::<_,Option<String>>(3)?,"payload":payload,"status":row.get::<_,String>(5)?,"version":row.get::<_,i64>(6)?,"created_at":row.get::<_,i64>(7)?,"source_analysis_id":row.get::<_,Option<String>>(8)?})) }).map_err(sql_error)?;
         let items = rows
-            .map(|row| row.map_err(|error| error.to_string()))
+            .map(|row| row.map_err(sql_error))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"items":items}))
     }
 
-    fn strategy_versions(&self, id: &str) -> Result<Value, String> {
-        let mut statement = self.connection.prepare("SELECT version,payload_json,status,created_at FROM sentiment_strategy_versions WHERE strategy_id=?1 ORDER BY version DESC").map_err(|error| error.to_string())?;
-        let rows = statement.query_map([id], |row| { let payload: Value = serde_json::from_str::<Value>(&row.get::<_,String>(1)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error)))?; Ok(json!({"version":row.get::<_,i64>(0)?,"payload":payload,"status":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?})) }).map_err(|error| error.to_string())?;
+    fn strategy_versions(&self, id: &str) -> Result<Value, CommandError> {
+        let mut statement = self.connection.prepare("SELECT version,payload_json,status,created_at FROM sentiment_strategy_versions WHERE strategy_id=?1 ORDER BY version DESC").map_err(sql_error)?;
+        let rows = statement.query_map([id], |row| { let payload: Value = serde_json::from_str::<Value>(&row.get::<_,String>(1)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error)))?; Ok(json!({"version":row.get::<_,i64>(0)?,"payload":payload,"status":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?})) }).map_err(sql_error)?;
         let items = rows
-            .map(|row| row.map_err(|error| error.to_string()))
+            .map(|row| row.map_err(sql_error))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(json!({"strategy_id":id,"items":items}))
     }
 
-    fn set_strategy_status(&self, id: &str, status: &str) -> Result<Value, String> {
+    fn set_strategy_status(&self, id: &str, status: &str) -> Result<Value, CommandError> {
         if !matches!(status, "active" | "disabled") {
             return Err("invalid strategy status".into());
         }
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+        let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
         let current_version: i64 = transaction
             .query_row(
                 "SELECT version FROM sentiment_strategies WHERE strategy_id=?1",
                 [id],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         let changed = transaction
             .execute(
                 "UPDATE sentiment_strategies SET status=?1 WHERE strategy_id=?2",
                 params![status, id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         if changed == 0 {
             return Err("strategy not found".into());
         }
@@ -551,29 +582,25 @@ impl EvolutionStore {
                 "UPDATE sentiment_strategy_versions SET status=?1 WHERE strategy_id=?2",
                 params![version_status, id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         if status == "active" {
-            transaction.execute("UPDATE sentiment_strategy_versions SET status='active' WHERE strategy_id=?1 AND version=?2", params![id,current_version]).map_err(|error| error.to_string())?;
+            transaction.execute("UPDATE sentiment_strategy_versions SET status='active' WHERE strategy_id=?1 AND version=?2", params![id,current_version]).map_err(sql_error)?;
         }
-        transaction.commit().map_err(|error| error.to_string())?;
+        transaction.commit().map_err(sql_error)?;
         self.strategies()
     }
 
-    fn rollback_strategy(&self, id: &str, version: i64) -> Result<Value, String> {
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
+    fn rollback_strategy(&self, id: &str, version: i64) -> Result<Value, CommandError> {
+        let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
         let payload_text: String = transaction.query_row(
             "SELECT payload_json FROM sentiment_strategy_versions WHERE strategy_id=?1 AND version=?2",
             params![id,version], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
-        let payload: Value =
-            serde_json::from_str(&payload_text).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
+        let payload: Value = serde_json::from_str(&payload_text).map_err(|error| ce(error))?;
         let next: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(version),0)+1 FROM sentiment_strategy_versions WHERE strategy_id=?1",
             [id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         let mut rolled = payload.clone();
         rolled["rolled_back_from"] = json!(version);
         let now = agent_ledger::current_epoch_millis();
@@ -582,26 +609,26 @@ impl EvolutionStore {
                 "UPDATE sentiment_strategy_versions SET status='superseded' WHERE strategy_id=?1",
                 [id],
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(sql_error)?;
         transaction.execute(
             "INSERT INTO sentiment_strategy_versions(strategy_id,version,payload_json,status,created_at) VALUES(?1,?2,?3,'active',?4)",
             params![id,next,rolled.to_string(),now],
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         let changed = transaction.execute(
             "UPDATE sentiment_strategies SET payload_json=?1,version=?2,status='active',created_at=?3 WHERE strategy_id=?4",
             params![rolled.to_string(),next,now,id],
-        ).map_err(|error| error.to_string())?;
+        ).map_err(sql_error)?;
         if changed == 0 {
             return Err("strategy not found".into());
         }
-        transaction.commit().map_err(|error| error.to_string())?;
+        transaction.commit().map_err(sql_error)?;
         self.strategies()
     }
 }
 
-fn with_store<T, F>(app: &AppHandle, operation: F) -> Result<T, String>
+fn with_store<T, F>(app: &AppHandle, operation: F) -> Result<T, CommandError>
 where
-    F: FnOnce(&EvolutionStore) -> Result<T, String>,
+    F: FnOnce(&EvolutionStore) -> Result<T, CommandError>,
 {
     let store = EvolutionStore::open(evolution_path(app)?)?;
     operation(&store)
@@ -659,18 +686,18 @@ fn is_loopback_host(host: Option<&str>) -> bool {
 pub(crate) async fn api_evolution_review_enhance(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
-    let llm = payload
-        .get("llm")
-        .cloned()
-        .ok_or("local model configuration is required")?;
+) -> Result<Value, CommandError> {
+    let llm = payload.get("llm").cloned().ok_or(CommandError::new(
+        codes::EVOLUTION_INPUT,
+        "local model configuration is required",
+    ))?;
     let base_url = llm.get("base_url").and_then(Value::as_str).unwrap_or("");
-    let url =
-        reqwest::Url::parse(base_url).map_err(|_| "invalid local model endpoint".to_string())?;
+    let url = reqwest::Url::parse(base_url)
+        .map_err(|_| CommandError::new(codes::EVOLUTION_INPUT, "invalid local model endpoint"))?;
     if !is_loopback_host(url.host_str()) {
-        return Err(
-            "model enhancement is local-only; configure a localhost model endpoint".to_string(),
-        );
+        return Err(ce(
+            "model enhancement is local-only; configure a localhost model endpoint",
+        ));
     }
     if llm
         .get("proxy_mode")
@@ -678,15 +705,17 @@ pub(crate) async fn api_evolution_review_enhance(
         .unwrap_or("none")
         != "none"
     {
-        return Err(
-            "model enhancement refuses proxy-routed endpoints; use a direct localhost model"
-                .to_string(),
-        );
+        return Err(ce(
+            "model enhancement refuses proxy-routed endpoints; use a direct localhost model",
+        ));
     }
-    let review = payload.get("review").cloned().ok_or("review is required")?;
-    let review_text = serde_json::to_string(&review).map_err(|error| error.to_string())?;
+    let review = payload.get("review").cloned().ok_or(CommandError::new(
+        codes::EVOLUTION_INPUT,
+        "review is required",
+    ))?;
+    let review_text = serde_json::to_string(&review).map_err(|error| ce(error))?;
     if review_text.len() > MAX_REVIEW_CHARS {
-        return Err("review payload is too large".into());
+        return Err(ce("review payload is too large"));
     }
     let prompt = format!("请对下面这次股票研究复盘做研究过程层面的增强。只能评价问题定义、证据覆盖、反证、失效条件和下一步验证；不要做人格诊断、心理诊断、交易建议或收益承诺。不要改写证据事实。输出简洁中文反馈。\\n复盘 JSON：{review_text}");
     let run_id = format!("evolution-review-{}", agent_ledger::current_epoch_millis());
@@ -724,7 +753,10 @@ pub(crate) async fn api_evolution_review_enhance(
     let review_id = result
         .get("review_id")
         .and_then(Value::as_str)
-        .ok_or("review_id is required")?
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "review_id is required",
+        ))?
         .to_string();
     with_store(&app, |store| {
         store.save_review(&review_id, &result)?;
@@ -737,7 +769,7 @@ pub(crate) async fn api_evolution_review_enhance(
 pub(crate) fn api_evolution_settings(
     app: AppHandle,
     payload: Option<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     with_store(&app, |store| {
         Ok(json!(match payload
             .as_ref()
@@ -749,15 +781,15 @@ pub(crate) fn api_evolution_settings(
     })
 }
 #[tauri::command]
-pub(crate) fn api_evolution_profile(app: AppHandle) -> Result<Value, String> {
+pub(crate) fn api_evolution_profile(app: AppHandle) -> Result<Value, CommandError> {
     with_store(&app, EvolutionStore::profile)
 }
 #[tauri::command]
-pub(crate) fn api_evolution_profile_reset(app: AppHandle) -> Result<Value, String> {
+pub(crate) fn api_evolution_profile_reset(app: AppHandle) -> Result<Value, CommandError> {
     with_store(&app, EvolutionStore::reset_profile)
 }
 #[tauri::command]
-pub(crate) fn api_evolution_review(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_review(app: AppHandle, payload: Value) -> Result<Value, CommandError> {
     with_store(&app, |store| {
         let review = deterministic_review(&payload, &store.suppressed_kinds()?);
         let id = review
@@ -770,95 +802,140 @@ pub(crate) fn api_evolution_review(app: AppHandle, payload: Value) -> Result<Val
     })
 }
 #[tauri::command]
-pub(crate) fn api_evolution_confirm_rule(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_confirm_rule(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     with_store(&app, |store| store.confirm_rule(&payload))
 }
 #[tauri::command]
-pub(crate) fn api_evolution_edit_rule(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_edit_rule(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     with_store(&app, |store| store.edit_rule(&payload))
 }
 #[tauri::command]
-pub(crate) fn api_evolution_rule_status(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_rule_status(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let id = payload
         .get("rule_id")
         .and_then(Value::as_str)
-        .ok_or("rule_id is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "rule_id is required",
+        ))?;
     let status = payload
         .get("status")
         .and_then(Value::as_str)
-        .ok_or("status is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "status is required",
+        ))?;
     with_store(&app, |store| store.set_rule_status(id, status))
 }
 #[tauri::command]
-pub(crate) fn api_evolution_delete_rule(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_delete_rule(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let id = payload
         .get("rule_id")
         .and_then(Value::as_str)
-        .ok_or("rule_id is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "rule_id is required",
+        ))?;
     with_store(&app, |store| store.set_rule_status(id, "deleted"))
 }
 #[tauri::command]
-pub(crate) fn api_evolution_suppress_kind(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_evolution_suppress_kind(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     with_store(&app, |store| store.suppress_kind(&payload))
 }
 #[tauri::command]
 pub(crate) fn api_evolution_unsuppress_kind(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let kind = payload
         .get("kind")
         .and_then(Value::as_str)
-        .ok_or("kind is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "kind is required",
+        ))?;
     with_store(&app, |store| store.unsuppress_kind(kind))
 }
 #[tauri::command]
-pub(crate) fn api_sentiment_strategy_save(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_sentiment_strategy_save(
+    app: AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     with_store(&app, |store| store.save_strategy(&payload))
 }
 #[tauri::command]
-pub(crate) fn api_sentiment_strategies(app: AppHandle) -> Result<Value, String> {
+pub(crate) fn api_sentiment_strategies(app: AppHandle) -> Result<Value, CommandError> {
     with_store(&app, EvolutionStore::strategies)
 }
 #[tauri::command]
 pub(crate) fn api_sentiment_strategy_versions(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let id = payload
         .get("strategy_id")
         .and_then(Value::as_str)
-        .ok_or("strategy_id is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "strategy_id is required",
+        ))?;
     with_store(&app, |store| store.strategy_versions(id))
 }
 #[tauri::command]
 pub(crate) fn api_sentiment_strategy_status(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let id = payload
         .get("strategy_id")
         .and_then(Value::as_str)
-        .ok_or("strategy_id is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "strategy_id is required",
+        ))?;
     let status = payload
         .get("status")
         .and_then(Value::as_str)
-        .ok_or("status is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "status is required",
+        ))?;
     with_store(&app, |store| store.set_strategy_status(id, status))
 }
 #[tauri::command]
 pub(crate) fn api_sentiment_strategy_rollback(
     app: AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let id = payload
         .get("strategy_id")
         .and_then(Value::as_str)
-        .ok_or("strategy_id is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "strategy_id is required",
+        ))?;
     let version = payload
         .get("version")
         .and_then(Value::as_i64)
-        .ok_or("version is required")?;
+        .ok_or(CommandError::new(
+            codes::EVOLUTION_INPUT,
+            "version is required",
+        ))?;
     with_store(&app, |store| store.rollback_strategy(id, version))
 }
 

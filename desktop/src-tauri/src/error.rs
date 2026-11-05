@@ -38,6 +38,13 @@ pub mod codes {
     pub const BACKUP_SCHEMA: &str = "backup.schema";
     pub const BACKUP_INPUT: &str = "backup.input";
     pub const BACKUP_INTERNAL: &str = "backup.internal";
+
+    /// 进化（策略 / 画像 / 复盘）。
+    pub const EVOLUTION_IO: &str = "evolution.io";
+    pub const EVOLUTION_SQLITE: &str = "evolution.sqlite";
+    pub const EVOLUTION_SCHEMA: &str = "evolution.schema";
+    pub const EVOLUTION_INPUT: &str = "evolution.input";
+    pub const EVOLUTION_INTERNAL: &str = "evolution.internal";
     pub const MARKET_IO: &str = "market.io";
     pub const MARKET_NETWORK: &str = "market.network";
     pub const MARKET_PROVIDER: &str = "market.provider";
