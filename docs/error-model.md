@@ -68,6 +68,8 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 | `desktop/src-tauri/src/core_api.rs` | — | 14 处签名；统一走 `run_core`，内部把 `Result<_, String>` 用 `CommandError::from` 转过来 |
 | `desktop/src-tauri/src/workspace.rs` | `workspace.internal` | 工作区存储 6 处签名；`err()` 辅助函数直接返回 `CommandError` |
 | `desktop/src-tauri/src/eval_replay.rs` | `eval_replay.internal` | 评测回放 7 处签名 |
+| `desktop/src-tauri/src/external_data/mod.rs` | `external_data.internal` | 外部数据命令层 9 处签名 |
+| `desktop/src-tauri/src/stock_research_runtime.rs` | `stock_research.internal` | 研究报告运行时 14 处签名 |
 | `desktop/src-tauri/src/market.rs`（含 `observe.rs`、`screening.rs`、`jobs.rs`、`hk_market.rs`、`rig_runtime.rs`、`external_data/mod.rs` 接缝） | `market.network` / `market.provider` / `market.io` / `market.input` / `market.internal` | 行情域 72 处签名；`ce()` 按消息关键词分类到 network/provider/io/input，其余落 internal。**这是被最多模块共享的域**：`with_market_refresh_permit` / `with_heavy_network_permit` 改成泛型 `E: From<String>`，`screening.rs` 在闭包内 `.map_err(String::from)` 回到 String |
 | `desktop/src-tauri/src/research.rs`（含 `research_recovery.rs`、`jobs.rs`、`sentiment.rs` 的接缝） | `research.io` / `research.sqlite` / `research.input` / `research.not_found` / `research.index_stale` / `research.pack_invalid` / `research.internal` | 研究库 90 处签名；`research.not_found` 已接到 `NewsRagPanel`：会话不存在时从列表摘掉并提示，而不是让用户反复点「重试加载会话」 |
 

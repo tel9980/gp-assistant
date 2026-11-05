@@ -1,8 +1,14 @@
+use crate::error::{codes, CommandError};
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 use std::path::Path;
 use stock_optimizer_core as gp_core;
 use tauri::Manager;
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::STOCK_RESEARCH_INTERNAL, message.to_string())
+}
 
 fn registry_exists(root: &Path) -> bool {
     root.join("stock-research")
@@ -10,19 +16,19 @@ fn registry_exists(root: &Path) -> bool {
         .is_file()
 }
 
-fn optional_text<'a>(payload: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+fn optional_text<'a>(payload: &'a Value, key: &str) -> Result<Option<&'a str>, CommandError> {
     payload
         .get(key)
         .map(|value| {
             value
                 .as_str()
                 .filter(|text| !text.trim().is_empty())
-                .ok_or_else(|| format!("研究元数据 {key} 必须是非空字符串"))
+                .ok_or_else(|| ce(format!("研究元数据 {key} 必须是非空字符串")))
         })
         .transpose()
 }
 
-fn validate_metadata(payload: &Value) -> Result<(), String> {
+fn validate_metadata(payload: &Value) -> Result<(), CommandError> {
     if payload
         .get("scoring_parameters")
         .is_some_and(|value| !value.is_null())
@@ -65,7 +71,7 @@ fn validate_metadata(payload: &Value) -> Result<(), String> {
 fn requested_parameters(
     root: &Path,
     payload: &Value,
-) -> Result<gp_research::ResolvedParameters, String> {
+) -> Result<gp_research::ResolvedParameters, CommandError> {
     validate_metadata(payload)?;
     let algorithm = optional_text(payload, "algorithm_version")?;
     let id = optional_text(payload, "parameter_set_id")?;
@@ -108,7 +114,7 @@ fn requested_parameters(
 fn requested_dataset(
     payload: &Value,
     resolved: &gp_research::ResolvedParameters,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, CommandError> {
     let explicit = optional_text(payload, "dataset_id")?;
     if resolved.parameters.algorithm_version == "adaptive_swing_v2" {
         if let Some(id) = explicit {
@@ -122,16 +128,16 @@ fn requested_dataset(
         .or_else(|| resolved.dataset_id.clone()))
 }
 
-fn compact_date(value: &str) -> Result<NaiveDate, String> {
+fn compact_date(value: &str) -> Result<NaiveDate, CommandError> {
     NaiveDate::parse_from_str(value, "%Y%m%d")
         .or_else(|_| NaiveDate::parse_from_str(value, "%Y-%m-%d"))
-        .map_err(|_| format!("无效的研究日期：{value}"))
+        .map_err(|_| ce(format!("无效的研究日期：{value}")))
 }
 
-pub(crate) fn status_at(root: &Path) -> Result<Value, String> {
+pub(crate) fn status_at(root: &Path) -> Result<Value, CommandError> {
     if registry_exists(root) {
-        let store =
-            gp_research::ResearchStore::open_readonly(root).map_err(|error| error.to_string())?;
+        let store = gp_research::ResearchStore::open_readonly(root)
+            .map_err(|error| ce(error.to_string()))?;
         let datasets = store.datasets().map_err(|error| error.to_string())?;
         let mut runs = store.reports().map_err(|error| error.to_string())?;
         runs.truncate(25);
@@ -147,13 +153,15 @@ pub(crate) fn status_at(root: &Path) -> Result<Value, String> {
         "datasets": [], "runs": [], "active_parameter_set": gp_core::fixed_scoring_parameters()}))
 }
 
-pub(crate) fn report_at(root: &Path, run_id: &str) -> Result<Value, String> {
+pub(crate) fn report_at(root: &Path, run_id: &str) -> Result<Value, CommandError> {
     if run_id.trim().is_empty() || run_id.len() > 200 {
-        return Err("研究报告标识无效".to_string());
+        return Err(ce("研究报告标识无效"));
     }
     let store =
-        gp_research::ResearchStore::open_readonly(root).map_err(|error| error.to_string())?;
-    let mut report = store.report(run_id).map_err(|error| error.to_string())?;
+        gp_research::ResearchStore::open_readonly(root).map_err(|error| ce(error.to_string()))?;
+    let mut report = store
+        .report(run_id)
+        .map_err(|error| ce(error.to_string()))?;
     let object = report
         .as_object_mut()
         .ok_or_else(|| "研究报告格式无效".to_string())?;
@@ -167,7 +175,7 @@ pub(crate) fn report_at(root: &Path, run_id: &str) -> Result<Value, String> {
 pub(crate) async fn screen_if_selected(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, CommandError> {
     let root = app
         .path()
         .app_data_dir()
@@ -175,13 +183,13 @@ pub(crate) async fn screen_if_selected(
     crate::runtime::run_cpu_bound("pit_screen", move || screen_at(&root, &payload)).await?
 }
 
-fn screen_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
+fn screen_at(root: &Path, payload: &Value) -> Result<Option<Value>, CommandError> {
     let resolved = requested_parameters(root, payload)?;
     let Some(dataset_id) = requested_dataset(payload, &resolved)? else {
         return Ok(None);
     };
     let store =
-        gp_research::ResearchStore::open_readonly(root).map_err(|error| error.to_string())?;
+        gp_research::ResearchStore::open_readonly(root).map_err(|error| ce(error.to_string()))?;
     let dataset = store
         .dataset(&dataset_id)
         .map_err(|error| error.to_string())?;
@@ -228,7 +236,7 @@ fn screen_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
 pub(crate) async fn backtest_if_selected(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<Value>, CommandError> {
     let root = app
         .path()
         .app_data_dir()
@@ -236,7 +244,7 @@ pub(crate) async fn backtest_if_selected(
     crate::runtime::run_cpu_bound("pit_backtest", move || backtest_at(&root, &payload)).await?
 }
 
-fn backtest_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
+fn backtest_at(root: &Path, payload: &Value) -> Result<Option<Value>, CommandError> {
     let mut identity = payload.clone();
     if !identity.is_object() {
         return Err("回测请求必须是对象".into());
@@ -260,7 +268,7 @@ fn backtest_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
         ] {
             if let Some(value) = spec.get(key) {
                 if identity.get(key).is_some_and(|outer| outer != value) {
-                    return Err(format!("回测与冻结选股元数据 {key} 不匹配"));
+                    return Err(ce(format!("回测与冻结选股元数据 {key} 不匹配")));
                 }
                 identity[key] = value.clone();
             }
@@ -353,7 +361,7 @@ fn backtest_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
         return Err("PIT 自适应回测使用条件候选池；固定自选标的请使用候选快照。".into());
     }
     let store =
-        gp_research::ResearchStore::open_readonly(root).map_err(|error| error.to_string())?;
+        gp_research::ResearchStore::open_readonly(root).map_err(|error| ce(error.to_string()))?;
     let dataset = store
         .dataset(&dataset_id)
         .map_err(|error| error.to_string())?;
@@ -378,7 +386,7 @@ fn backtest_at(root: &Path, payload: &Value) -> Result<Option<Value>, String> {
     Ok(Some(backtest_view(&report)?))
 }
 
-fn backtest_view(report: &gp_research::EvaluationReport) -> Result<Value, String> {
+fn backtest_view(report: &gp_research::EvaluationReport) -> Result<Value, CommandError> {
     let symbols = report
         .monthly_folds
         .iter()
@@ -424,7 +432,9 @@ fn backtest_view(report: &gp_research::EvaluationReport) -> Result<Value, String
 }
 
 #[tauri::command]
-pub(crate) async fn api_stock_research_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_stock_research_status(
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
     let root = app
         .path()
         .app_data_dir()
@@ -436,7 +446,7 @@ pub(crate) async fn api_stock_research_status(app: tauri::AppHandle) -> Result<V
 pub(crate) async fn api_stock_research_report(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let root = app
         .path()
         .app_data_dir()

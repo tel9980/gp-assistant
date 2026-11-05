@@ -62,7 +62,10 @@ pub mod codes {
     pub const RESEARCH_IMPORT_INTERNAL: &str = "research_import.internal";
     pub const AGENT_HARNESS_INTERNAL: &str = "agent_harness.internal";
     pub const RAG_PACK_INTERNAL: &str = "rag_pack.internal";
+    #[cfg_attr(not(test), allow(dead_code))]
     pub const EVAL_REPLAY_INTERNAL: &str = "eval_replay.internal";
+    pub const EXTERNAL_DATA_INTERNAL: &str = "external_data.internal";
+    pub const STOCK_RESEARCH_INTERNAL: &str = "stock_research.internal";
     pub const WORKSPACE_INTERNAL: &str = "workspace.internal";
 
     /// 后台任务调度（jobs）。

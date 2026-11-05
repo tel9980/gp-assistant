@@ -10,10 +10,16 @@ pub(crate) use refresh::shared_refresh_coordinator;
 pub(crate) use refresh::{execute_with_retry, RetryPolicy};
 pub(crate) use store::{DataStore, RefreshRunState, RefreshRunStatus};
 
+use crate::error::{codes, CommandError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::EXTERNAL_DATA_INTERNAL, message.to_string())
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -167,24 +173,26 @@ pub(crate) fn store_path(app_data_dir: &Path) -> PathBuf {
         .join("external-data.sqlite")
 }
 
-pub(crate) fn open_app_store(app: &tauri::AppHandle) -> Result<DataStore, String> {
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve external data directory: {error}"))?;
-    DataStore::open(store_path(&root)).map_err(String::from)
+pub(crate) fn open_app_store(app: &tauri::AppHandle) -> Result<DataStore, CommandError> {
+    let root = app.path().app_data_dir().map_err(|error| {
+        ce(format!(
+            "failed to resolve external data directory: {error}"
+        ))
+    })?;
+    DataStore::open(store_path(&root))
 }
 
 #[tauri::command]
-pub(crate) fn api_data_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn api_data_status(app: tauri::AppHandle) -> Result<Value, CommandError> {
     status_for_app(&app)
 }
 
-pub(crate) fn status_for_app(app: &tauri::AppHandle) -> Result<Value, String> {
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve external data directory: {error}"))?;
+pub(crate) fn status_for_app(app: &tauri::AppHandle) -> Result<Value, CommandError> {
+    let root = app.path().app_data_dir().map_err(|error| {
+        ce(format!(
+            "failed to resolve external data directory: {error}"
+        ))
+    })?;
     let path = store_path(&root);
     if !path.exists() {
         return Ok(serde_json::json!({
@@ -209,20 +217,21 @@ pub(crate) fn status_for_app(app: &tauri::AppHandle) -> Result<Value, String> {
 pub(crate) fn api_data_cleanup_preview(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let domains = parse_domains(&payload)?;
     let cutoff = payload
         .get("cutoff")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    open_app_store(&app)?
-        .cleanup_preview(&domains, cutoff)
-        .map_err(String::from)
+    open_app_store(&app)?.cleanup_preview(&domains, cutoff)
 }
 
 #[tauri::command]
-pub(crate) fn api_data_cleanup(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_data_cleanup(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let domains = parse_domains(&payload)?;
     let cutoff = payload
         .get("cutoff")
@@ -243,7 +252,7 @@ pub(crate) fn api_data_cleanup(app: tauri::AppHandle, payload: Value) -> Result<
 }
 
 #[tauri::command]
-pub(crate) async fn api_data_resume_explicit(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_data_resume_explicit(app: tauri::AppHandle) -> Result<Value, CommandError> {
     let hk = crate::hk_market::resume_explicit_hk_refreshes(app.clone()).await?;
     let cn = crate::market::resume_explicit_cn_refreshes(app).await?;
     Ok(serde_json::json!({ "hk": hk, "cn": cn }))
@@ -253,26 +262,22 @@ pub(crate) async fn api_data_resume_explicit(app: tauri::AppHandle) -> Result<Va
 pub(crate) async fn api_data_refresh(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let market = match payload
         .get("market")
         .and_then(Value::as_str)
         .unwrap_or("cn")
     {
-        "hk" => {
-            return crate::hk_market::api_explicit_hk_refresh(app, payload)
-                .await
-                .map_err(String::from)
-        }
+        "hk" => return crate::hk_market::api_explicit_hk_refresh(app, payload).await,
         "cn" => Market::China,
-        other => return Err(format!("unsupported refresh market: {other}")),
+        other => return Err(ce(format!("unsupported refresh market: {other}"))),
     };
     let requested_domain = payload
         .get("domain")
         .and_then(Value::as_str)
         .unwrap_or("quote");
     if requested_domain != "quote" {
-        return Err(format!("the current A-share provider adapter only refreshes the quote/universe bundle; {requested_domain} was not started"));
+        return Err(ce(format!("the current A-share provider adapter only refreshes the quote/universe bundle; {requested_domain} was not started")));
     }
     let codes = payload
         .get("entity_codes")
@@ -317,26 +322,24 @@ pub(crate) async fn api_data_refresh(
         object.insert("request_id".into(), Value::String(request_id));
         object.insert("data_policy".into(), Value::String("refresh".into()));
     }
-    crate::market::api_market_refresh(app, refresh_payload)
-        .await
-        .map_err(String::from)
+    crate::market::api_market_refresh(app, refresh_payload).await
 }
 
 #[tauri::command]
 pub(crate) fn api_data_refresh_status(
     app: tauri::AppHandle,
     run_id: String,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let store = open_app_store(&app)?;
     store
         .refresh_run_status(&run_id)?
         .map(serde_json::to_value)
         .transpose()
-        .map_err(|error| format!("encode external refresh status: {error}"))?
+        .map_err(|error| ce(format!("encode external refresh status: {error}")))?
         .ok_or_else(|| "external refresh run was not found".into())
 }
 
-fn parse_domains(payload: &Value) -> Result<Vec<DataDomain>, String> {
+fn parse_domains(payload: &Value) -> Result<Vec<DataDomain>, CommandError> {
     let values = payload
         .get("domains")
         .and_then(Value::as_array)
@@ -358,7 +361,7 @@ fn parse_domains(payload: &Value) -> Result<Vec<DataDomain>, String> {
                 "fx_rate" => Ok(DataDomain::FxRate),
                 "disclosure" => Ok(DataDomain::Disclosure),
                 "news" => Ok(DataDomain::News),
-                _ => Err(format!("unsupported external data domain: {name}")),
+                _ => Err(ce(format!("unsupported external data domain: {name}"))),
             }
         })
         .collect()
