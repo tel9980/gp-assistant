@@ -6,12 +6,19 @@ import { reasonLabel } from "./format";
 type ObservePanelModule = typeof import("../components/panels/ObservePanel");
 
 const nodeFs = "node:fs";
-const { readFileSync } = await import(nodeFs);
+const { readFileSync, readdirSync } = await import(nodeFs);
 
 const stylesDirectory = new URL("../styles/", import.meta.url);
 const pagesCss = readFileSync(new URL("pages.css", stylesDirectory), "utf8");
 const responsiveCss = readFileSync(new URL("responsive.css", stylesDirectory), "utf8");
-const nativeCore = readFileSync(new URL("../../../../native/gp-core/src/lib.rs", import.meta.url), "utf8");
+const nativeCoreDir = new URL("../../../../native/gp-core/src/", import.meta.url);
+// lib.rs 已按领域拆成多个模块（trend/backtest/scoring/...），契约检查要扫整个 src 目录，
+// 否则任何一次模块拆分都会让"原生枚举必须都有前端翻译"这条守护静默失效。
+const nativeCore = readdirSync(nativeCoreDir)
+  .filter((name: string) => name.endsWith(".rs"))
+  .sort()
+  .map((name: string) => readFileSync(new URL(name, nativeCoreDir), "utf8"))
+  .join("\n");
 let ObserveResultView: ObservePanelModule["ObserveResultView"];
 let formatObserveTime: ObservePanelModule["formatObserveTime"];
 let patternSignalLabel: ObservePanelModule["patternSignalLabel"];

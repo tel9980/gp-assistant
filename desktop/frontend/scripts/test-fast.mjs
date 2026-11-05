@@ -22,7 +22,10 @@ function walk(dir) {
 }
 
 const all = walk("src").sort();
-const mocking = all.filter((f) => /vi\.mock\(".*lib\/tauri"/.test(readFileSync(f, "utf8")));
+// 任一文件只要整模块替换了 IPC 层（lib/tauri 或它包裹的 @tauri-apps/api/core），
+// 在共享模块图里就会把替身留给别的文件 → 一律进隔离段。
+const IPC_MOCK_RE = /vi\.mock\(\s*["'][^"']*(?:lib\/tauri|@tauri-apps\/api\/core)["']/;
+const mocking = all.filter((f) => IPC_MOCK_RE.test(readFileSync(f, "utf8")));
 const shared = all.filter((f) => !mocking.includes(f));
 
 function run(files, env) {
