@@ -1092,7 +1092,7 @@ try {
     let encoded = String::from_utf8_lossy(&output.stdout);
     let encoded = encoded.trim();
     if encoded.is_empty() {
-        return Err("PowerShell HTTP 返回空响应".to_string());
+        return Err(ce("PowerShell HTTP 返回空响应"));
     }
     general_purpose::STANDARD.decode(encoded).map_err(|error| {
         CommandError::new(
@@ -1192,7 +1192,7 @@ try {
     let encoded = String::from_utf8_lossy(&output.stdout);
     let encoded = encoded.trim();
     if encoded.is_empty() {
-        return Err("PowerShell HTTP 返回空响应".to_string());
+        return Err(ce("PowerShell HTTP 返回空响应"));
     }
     general_purpose::STANDARD.decode(encoded).map_err(|error| {
         CommandError::new(
@@ -5233,11 +5233,11 @@ pub(crate) fn project_market_store_with_legacy(
     });
     let mut projected = legacy.cloned().unwrap_or_else(|| serde_json::json!({}));
     let Some(object) = projected.as_object_mut() else {
-        return Err("legacy market dataset projection is not a JSON object".into());
+        return Err(ce("legacy market dataset projection is not a JSON object"));
     };
     let external_object = external
         .as_object()
-        .ok_or_else(|| "external market dataset projection is not a JSON object".to_string())?;
+        .ok_or_else(|| ce("external market dataset projection is not a JSON object"))?;
 
     if promoted.contains(&(DataDomain::SecurityMaster, Market::China)) {
         for key in ["generated_at_epoch_ms", "updated_at_epoch_ms", "notes"] {

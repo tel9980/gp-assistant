@@ -5824,7 +5824,8 @@ pub(crate) fn schedule_research_embeddings(app: tauri::AppHandle) {
                     rebuild_research_embeddings(&worker_app)
                 })
                 .await
-                .and_then(|result| result);
+                .map_err(String::from)
+                .and_then(|result| result.map_err(String::from));
             let event = match result {
                 Ok(status) => json!({"ok": true, "status": status}),
                 Err(error) => json!({"ok": false, "error": error}),
