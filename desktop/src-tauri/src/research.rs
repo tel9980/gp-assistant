@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use jieba_rs::Jieba;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -109,6 +110,12 @@ pub(crate) struct KnowledgeDocumentStatus {
     pub updated_at_epoch_ms: i64,
 }
 
+/// 研究模块的错误统一从这里出：保留原文，落到研究域错误码。
+/// 需要更精确的错误码时用 `CommandError::new(codes::RESEARCH_*, ...)` 直接构造。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::RESEARCH_INTERNAL, message.to_string())
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -118,11 +125,15 @@ pub(crate) struct ResearchStore {
 }
 
 impl ResearchStore {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, CommandError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create research directory: {error}"))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                CommandError::new(
+                    codes::RESEARCH_IO,
+                    format!("failed to create research directory: {error}"),
+                )
+            })?;
         }
         let existed = path.exists();
         if existed {
@@ -131,16 +142,20 @@ impl ResearchStore {
         let registry = INITIALIZED_DATABASES.get_or_init(|| Mutex::new(HashSet::new()));
         let mut initialized = registry
             .lock()
-            .map_err(|_| "research database initialization lock is poisoned".to_string())?;
+            .map_err(|_| ce("research database initialization lock is poisoned".to_string()))?;
         if !existed || !initialized.contains(&path) {
             if existed {
                 recovery::validate_database(&path)?;
             }
-            let connection = Connection::open(&path)
-                .map_err(|error| format!("failed to open research database: {error}"))?;
+            let connection = Connection::open(&path).map_err(|error| {
+                CommandError::new(
+                    codes::RESEARCH_SQLITE,
+                    format!("failed to open research database: {error}"),
+                )
+            })?;
             let version: i64 = connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| ce(e.to_string()))?;
             crate::durability::backup_before_migration(
                 &connection,
                 &path,
@@ -153,14 +168,14 @@ impl ResearchStore {
         Ok(Self { path })
     }
 
-    pub(crate) fn ingest_documents(&self, documents: &[Value]) -> Result<Value, String> {
+    pub(crate) fn ingest_documents(&self, documents: &[Value]) -> Result<Value, CommandError> {
         if documents.is_empty() {
             return Ok(json!({"document_count": 0, "chunk_count": 0}));
         }
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start research import: {error}"))?;
+            .map_err(|error| ce(format!("failed to start research import: {error}")))?;
         let imported_at = epoch_millis();
         let mut chunk_count = 0usize;
 
@@ -172,7 +187,7 @@ impl ResearchStore {
                 .or_else(|| string_field(document, "text"))
                 .unwrap_or_default();
             if content.trim().is_empty() {
-                return Err(format!("document {document_id} has no text content"));
+                return Err(ce(format!("document {document_id} has no text content")));
             }
             let source_tier = normalize_source_tier(
                 string_field(document, "source_tier")
@@ -199,11 +214,11 @@ impl ResearchStore {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok());
             let stock_codes_json = serde_json::to_string(&stock_codes)
-                .map_err(|error| format!("failed to encode stock codes: {error}"))?;
+                .map_err(|error| ce(format!("failed to encode stock codes: {error}")))?;
             let entities_json = serde_json::to_string(&entities)
-                .map_err(|error| format!("failed to encode entities: {error}"))?;
+                .map_err(|error| ce(format!("failed to encode entities: {error}")))?;
             let relation_types_json = serde_json::to_string(&relation_types)
-                .map_err(|error| format!("failed to encode relation types: {error}"))?;
+                .map_err(|error| ce(format!("failed to encode relation types: {error}")))?;
             let metadata_json = document_metadata(document).to_string();
             let content_hash = sha256_hex(content.as_bytes());
             let existing_document = transaction
@@ -213,7 +228,12 @@ impl ResearchStore {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()
-                .map_err(|error| format!("failed to inspect existing document: {error}"))?;
+                .map_err(|error| {
+                    CommandError::new(
+                        codes::RESEARCH_SQLITE,
+                        format!("failed to inspect existing document: {error}"),
+                    )
+                })?;
             if let Some((existing_hash, cited_count)) = existing_document {
                 if existing_hash != content_hash && cited_count > 0 {
                     let revision = content_hash.get(..12).unwrap_or(content_hash.as_str());
@@ -227,7 +247,12 @@ impl ResearchStore {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()
-                .map_err(|error| format!("failed to inspect existing document: {error}"))?
+                .map_err(|error| {
+                    CommandError::new(
+                        codes::RESEARCH_SQLITE,
+                        format!("failed to inspect existing document: {error}"),
+                    )
+                })?
                 .as_deref()
                 == Some(content_hash.as_str());
             let derived_metadata_unchanged = content_unchanged
@@ -299,7 +324,7 @@ impl ResearchStore {
                         metadata_json
                     ],
                 )
-                .map_err(|error| format!("failed to store research document: {error}"))?;
+                .map_err(|error| CommandError::new(codes::RESEARCH_SQLITE, format!("failed to store research document: {error}")))?;
 
             if derived_metadata_unchanged {
                 continue;
@@ -334,19 +359,29 @@ impl ResearchStore {
                     )",
                     params![document_id],
                 )
-                .map_err(|error| format!("failed to clear research FTS rows: {error}"))?;
+                .map_err(|error| ce(format!("failed to clear research FTS rows: {error}")))?;
             transaction
                 .execute(
                     "DELETE FROM chunks WHERE document_id = ?1",
                     params![document_id],
                 )
-                .map_err(|error| format!("failed to replace research chunks: {error}"))?;
+                .map_err(|error| {
+                    CommandError::new(
+                        codes::RESEARCH_SQLITE,
+                        format!("failed to replace research chunks: {error}"),
+                    )
+                })?;
             transaction
                 .execute(
                     "DELETE FROM research_messages WHERE document_id = ?1",
                     params![document_id],
                 )
-                .map_err(|error| format!("failed to replace research messages: {error}"))?;
+                .map_err(|error| {
+                    CommandError::new(
+                        codes::RESEARCH_SQLITE,
+                        format!("failed to replace research messages: {error}"),
+                    )
+                })?;
 
             let chunks = split_text(&content, DEFAULT_CHUNK_CHARS, DEFAULT_CHUNK_OVERLAP);
             for (ordinal, chunk_text) in chunks.iter().enumerate() {
@@ -381,7 +416,12 @@ impl ResearchStore {
                             imported_at
                         ],
                     )
-                    .map_err(|error| format!("failed to store research chunk: {error}"))?;
+                    .map_err(|error| {
+                        CommandError::new(
+                            codes::RESEARCH_SQLITE,
+                            format!("failed to store research chunk: {error}"),
+                        )
+                    })?;
                 transaction
                     .execute(
                         "INSERT INTO chunks_fts (chunk_id, title_terms, entity_terms, body_terms)
@@ -393,7 +433,12 @@ impl ResearchStore {
                             tokenize_for_fts(chunk_text)
                         ],
                     )
-                    .map_err(|error| format!("failed to index research chunk: {error}"))?;
+                    .map_err(|error| {
+                        CommandError::new(
+                            codes::RESEARCH_SQLITE,
+                            format!("failed to index research chunk: {error}"),
+                        )
+                    })?;
                 chunk_count += 1;
             }
 
@@ -423,14 +468,14 @@ impl ResearchStore {
                             imported_at
                         ],
                     )
-                    .map_err(|error| format!("failed to create research message: {error}"))?;
+                    .map_err(|error| ce(format!("failed to create research message: {error}")))?;
             }
         }
 
         let retention = prune_retention_transaction(&transaction, MAX_RESEARCH_CHUNKS)?;
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit research import: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit research import: {error}")))?;
         if !documents.is_empty() || retention["removed_chunks"].as_u64().unwrap_or(0) > 0 {
             invalidate_vector_cache(&self.path);
         }
@@ -442,29 +487,31 @@ impl ResearchStore {
         }))
     }
 
-    pub(crate) fn prune_retention(&self) -> Result<Value, String> {
+    pub(crate) fn prune_retention(&self) -> Result<Value, CommandError> {
         self.prune_retention_to_limit(MAX_RESEARCH_CHUNKS)
     }
 
-    fn prune_retention_to_limit(&self, chunk_limit: i64) -> Result<Value, String> {
+    fn prune_retention_to_limit(&self, chunk_limit: i64) -> Result<Value, CommandError> {
         let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| format!("failed to start research retention cleanup: {error}"))?;
+        let transaction = connection.transaction().map_err(|error| {
+            ce(format!(
+                "failed to start research retention cleanup: {error}"
+            ))
+        })?;
         let retention = prune_retention_transaction(&transaction, chunk_limit)?;
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit retention cleanup: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit retention cleanup: {error}")))?;
         if retention["removed_chunks"].as_u64().unwrap_or(0) > 0 {
             invalidate_vector_cache(&self.path);
         }
         Ok(retention)
     }
 
-    pub(crate) fn export_portable_pack(&self, destination: &Path) -> Result<Value, String> {
+    pub(crate) fn export_portable_pack(&self, destination: &Path) -> Result<Value, CommandError> {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create pack directory: {error}"))?;
+                .map_err(|error| ce(format!("failed to create pack directory: {error}")))?;
         }
         let temporary = destination.with_extension(format!(
             "sqlite.tmp-{}-{}",
@@ -472,13 +519,16 @@ impl ResearchStore {
             unique_suffix()
         ));
         if temporary.exists() {
-            fs::remove_file(&temporary)
-                .map_err(|error| format!("failed to clear stale pack temporary file: {error}"))?;
+            fs::remove_file(&temporary).map_err(|error| {
+                ce(format!(
+                    "failed to clear stale pack temporary file: {error}"
+                ))
+            })?;
         }
         let documents = self.portable_documents()?;
         validate_portable_documents(&documents)?;
         let mut pack = Connection::open(&temporary)
-            .map_err(|error| format!("failed to create SQLite v2 pack: {error}"))?;
+            .map_err(|error| ce(format!("failed to create SQLite v2 pack: {error}")))?;
         pack.execute_batch(
             "PRAGMA journal_mode = DELETE;
              PRAGMA synchronous = FULL;
@@ -492,10 +542,10 @@ impl ResearchStore {
              );
              PRAGMA user_version = 2;",
         )
-        .map_err(|error| format!("failed to initialize SQLite v2 pack: {error}"))?;
+        .map_err(|error| ce(format!("failed to initialize SQLite v2 pack: {error}")))?;
         let transaction = pack
             .transaction()
-            .map_err(|error| format!("failed to start SQLite v2 pack: {error}"))?;
+            .map_err(|error| ce(format!("failed to start SQLite v2 pack: {error}")))?;
         transaction
             .execute(
                 "INSERT INTO pack_metadata (key, value) VALUES
@@ -505,7 +555,7 @@ impl ResearchStore {
                     ('contains_chat_history', 'false')",
                 [],
             )
-            .map_err(|error| format!("failed to write pack metadata: {error}"))?;
+            .map_err(|error| ce(format!("failed to write pack metadata: {error}")))?;
         for document in &documents {
             let document_id = string_field(document, "document_id")
                 .ok_or_else(|| "portable document is missing document_id".to_string())?;
@@ -514,39 +564,43 @@ impl ResearchStore {
                     "INSERT INTO pack_documents (document_id, payload_json) VALUES (?1, ?2)",
                     params![document_id, document.to_string()],
                 )
-                .map_err(|error| format!("failed to write portable document: {error}"))?;
+                .map_err(|error| ce(format!("failed to write portable document: {error}")))?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit SQLite v2 pack: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit SQLite v2 pack: {error}")))?;
         pack.execute_batch("VACUUM;")
-            .map_err(|error| format!("failed to finalize SQLite v2 pack: {error}"))?;
+            .map_err(|error| ce(format!("failed to finalize SQLite v2 pack: {error}")))?;
         drop(pack);
         let temporary_bytes = fs::metadata(&temporary)
-            .map_err(|error| format!("failed to inspect SQLite v2 pack: {error}"))?
+            .map_err(|error| ce(format!("failed to inspect SQLite v2 pack: {error}")))?
             .len();
         if temporary_bytes > MAX_PACK_BYTES {
             let _ = fs::remove_file(&temporary);
-            return Err(format!(
+            return Err(ce(format!(
                 "exported research pack exceeds the {} byte safety limit",
                 MAX_PACK_BYTES
-            ));
+            )));
         }
 
         let previous = destination.with_extension("sqlite.previous");
         if previous.exists() {
-            fs::remove_file(&previous)
-                .map_err(|error| format!("failed to replace previous portable pack: {error}"))?;
+            fs::remove_file(&previous).map_err(|error| {
+                ce(format!("failed to replace previous portable pack: {error}"))
+            })?;
         }
         if destination.exists() {
-            fs::rename(destination, &previous)
-                .map_err(|error| format!("failed to preserve previous portable pack: {error}"))?;
+            fs::rename(destination, &previous).map_err(|error| {
+                ce(format!(
+                    "failed to preserve previous portable pack: {error}"
+                ))
+            })?;
         }
         if let Err(error) = fs::rename(&temporary, destination) {
             if previous.exists() && !destination.exists() {
                 let _ = fs::rename(&previous, destination);
             }
-            return Err(format!("failed to publish SQLite v2 pack: {error}"));
+            return Err(ce(format!("failed to publish SQLite v2 pack: {error}")));
         }
         let bytes = fs::metadata(destination)
             .map(|value| value.len())
@@ -563,7 +617,7 @@ impl ResearchStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn import_portable_pack(&self, path: &Path) -> Result<Value, String> {
+    pub(crate) fn import_portable_pack(&self, path: &Path) -> Result<Value, CommandError> {
         let documents = read_portable_pack(path)?;
         let result = self.ingest_documents(&documents)?;
         Ok(json!({
@@ -576,7 +630,7 @@ impl ResearchStore {
         }))
     }
 
-    fn portable_documents(&self) -> Result<Vec<Value>, String> {
+    fn portable_documents(&self) -> Result<Vec<Value>, CommandError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
@@ -592,7 +646,7 @@ impl ResearchStore {
                  )
                  ORDER BY d.imported_at_epoch_ms, d.id",
             )
-            .map_err(|error| format!("failed to prepare portable documents: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare portable documents: {error}")))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -614,9 +668,9 @@ impl ResearchStore {
                     row.get::<_, Option<String>>(15)?,
                 ))
             })
-            .map_err(|error| format!("failed to query portable documents: {error}"))?
+            .map_err(|error| ce(format!("failed to query portable documents: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read portable documents: {error}"))?;
+            .map_err(|error| ce(format!("failed to read portable documents: {error}")))?;
         Ok(rows
             .into_iter()
             .map(
@@ -661,7 +715,7 @@ impl ResearchStore {
             .collect())
     }
 
-    pub(crate) fn query(&self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn query(&self, request: &Value) -> Result<Value, CommandError> {
         self.query_with_vector(request, None)
     }
 
@@ -669,10 +723,13 @@ impl ResearchStore {
         &self,
         request: &Value,
         query_vector: Option<&[f32]>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let query = string_field(request, "query").unwrap_or_default();
         if query.trim().is_empty() {
-            return Err("query is required".to_string());
+            return Err(CommandError::new(
+                codes::RESEARCH_INPUT,
+                "query is required",
+            ));
         }
         let stock_code =
             string_field(request, "stock_code").map(|value| value.trim().to_ascii_uppercase());
@@ -707,7 +764,7 @@ impl ResearchStore {
                  ORDER BY bm25(chunks_fts, 0.0, 3.0, 2.0, 1.0)
                  LIMIT 50",
             )
-            .map_err(|error| format!("failed to prepare research query: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare research query: {error}")))?;
         let rows = statement
             .query_map(
                 params![match_query, stock_code, remote_safe_only as i64],
@@ -729,12 +786,12 @@ impl ResearchStore {
                     ))
                 },
             )
-            .map_err(|error| format!("failed to execute research query: {error}"))?;
+            .map_err(|error| ce(format!("failed to execute research query: {error}")))?;
 
         let mut scored = Vec::new();
         for row in rows {
             let (candidate, lexical_score) =
-                row.map_err(|error| format!("failed to read research candidate: {error}"))?;
+                row.map_err(|error| ce(format!("failed to read research candidate: {error}")))?;
             scored.push((candidate, lexical_score));
         }
         let lexical_ranking = scored
@@ -854,7 +911,7 @@ impl ResearchStore {
     pub(crate) fn pending_embedding_chunks(
         &self,
         limit: usize,
-    ) -> Result<Vec<EmbeddingWorkItem>, String> {
+    ) -> Result<Vec<EmbeddingWorkItem>, CommandError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
@@ -865,7 +922,7 @@ impl ResearchStore {
                  ORDER BY c.created_at_epoch_ms, c.document_id, c.ordinal
                  LIMIT ?1",
             )
-            .map_err(|error| format!("failed to prepare pending embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare pending embeddings: {error}")))?;
         let items = statement
             .query_map(params![limit.clamp(1, 50_000) as i64], |row| {
                 let title: String = row.get(2)?;
@@ -876,9 +933,9 @@ impl ResearchStore {
                     text: format!("{title}\n{content}"),
                 })
             })
-            .map_err(|error| format!("failed to query pending embeddings: {error}"))?
+            .map_err(|error| ce(format!("failed to query pending embeddings: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read pending embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to read pending embeddings: {error}")))?;
         Ok(items)
     }
 
@@ -886,19 +943,19 @@ impl ResearchStore {
         &self,
         items: &[(EmbeddingWorkItem, Vec<f32>)],
         model_id: &str,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start embedding update: {error}"))?;
+            .map_err(|error| ce(format!("failed to start embedding update: {error}")))?;
         let created_at = epoch_millis();
         for (item, vector) in items {
             if vector.len() != 512 {
-                return Err(format!(
+                return Err(ce(format!(
                     "embedding {} has invalid dimension {}",
                     item.chunk_id,
                     vector.len()
-                ));
+                )));
             }
             let vector = normalize_embedding(vector).map_err(|error| {
                 format!("embedding {} cannot be normalized: {error}", item.chunk_id)
@@ -923,11 +980,11 @@ impl ResearchStore {
                         created_at
                     ],
                 )
-                .map_err(|error| format!("failed to store embedding: {error}"))?;
+                .map_err(|error| ce(format!("failed to store embedding: {error}")))?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit embeddings: {error}")))?;
         invalidate_vector_cache(&self.path);
         Ok(json!({"stored": items.len(), "model_id": model_id}))
     }
@@ -938,11 +995,14 @@ impl ResearchStore {
         query_vector: &[f32],
         stock_code: Option<&str>,
         remote_safe_only: bool,
-    ) -> Result<Vec<(Candidate, f64)>, String> {
+    ) -> Result<Vec<(Candidate, f64)>, CommandError> {
         if query_vector.len() != 512 {
-            return Err(format!(
-                "query embedding has invalid dimension {}",
-                query_vector.len()
+            return Err(CommandError::new(
+                codes::RESEARCH_INDEX_STALE,
+                format!(
+                    "query embedding has invalid dimension {}",
+                    query_vector.len()
+                ),
             ));
         }
         let vectors = load_vector_cache(connection, &self.path)?;
@@ -973,7 +1033,7 @@ impl ResearchStore {
             .collect()
     }
 
-    pub(crate) fn overview(&self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn overview(&self, request: &Value) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let stock_code = string_field(request, "stock_code");
         let unread_count: i64 = if let Some(code) = stock_code.as_deref() {
@@ -983,7 +1043,7 @@ impl ResearchStore {
                     params![code],
                     |row| row.get(0),
                 )
-                .map_err(|error| format!("failed to count unread research messages: {error}"))?
+                .map_err(|error| ce(format!("failed to count unread research messages: {error}")))?
         } else {
             connection
                 .query_row(
@@ -991,7 +1051,7 @@ impl ResearchStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|error| format!("failed to count unread research messages: {error}"))?
+                .map_err(|error| ce(format!("failed to count unread research messages: {error}")))?
         };
         let mut unread_by_stock = HashMap::new();
         let mut unread_statement = connection
@@ -1000,23 +1060,23 @@ impl ResearchStore {
                  WHERE unread = 1 AND stock_code IS NOT NULL AND stock_code != ''
                  GROUP BY stock_code",
             )
-            .map_err(|error| format!("failed to prepare unread stock summary: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare unread stock summary: {error}")))?;
         let unread_rows = unread_statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|error| format!("failed to query unread stock summary: {error}"))?;
+            .map_err(|error| ce(format!("failed to query unread stock summary: {error}")))?;
         for row in unread_rows {
             let (code, count) =
-                row.map_err(|error| format!("failed to read unread stock summary: {error}"))?;
+                row.map_err(|error| ce(format!("failed to read unread stock summary: {error}")))?;
             unread_by_stock.insert(code, count);
         }
         let document_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count research documents: {error}"))?;
+            .map_err(|error| ce(format!("failed to count research documents: {error}")))?;
         let chunk_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count research chunks: {error}"))?;
+            .map_err(|error| ce(format!("failed to count research chunks: {error}")))?;
         let updated_at_epoch_ms: Option<i64> = connection
             .query_row(
                 "SELECT COALESCE(
@@ -1026,7 +1086,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to read research refresh time: {error}"))?;
+            .map_err(|error| ce(format!("failed to read research refresh time: {error}")))?;
         let mut source_statement = connection
             .prepare(
                 "SELECT source_tier, COUNT(*) FROM documents GROUP BY source_tier
@@ -1036,12 +1096,12 @@ impl ResearchStore {
                     WHEN 'news' THEN 5 WHEN 'research_report' THEN 6
                     WHEN 'community' THEN 7 ELSE 8 END",
             )
-            .map_err(|error| format!("failed to prepare source summary: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare source summary: {error}")))?;
         let source_counts = source_statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|error| format!("failed to query source summary: {error}"))?
+            .map_err(|error| ce(format!("failed to query source summary: {error}")))?
             .filter_map(Result::ok)
             .map(|(tier, count)| json!({"source_tier": tier, "count": count}))
             .collect::<Vec<_>>();
@@ -1067,7 +1127,7 @@ impl ResearchStore {
         }))
     }
 
-    pub(crate) fn messages(&self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn messages(&self, request: &Value) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let stock_code = string_field(request, "stock_code");
         let unread_only = bool_field(request, "unread_only");
@@ -1094,7 +1154,7 @@ impl ResearchStore {
                  ORDER BY COALESCE(messages.published_at, '') DESC, messages.created_at_epoch_ms DESC
                  LIMIT ?3 OFFSET ?4",
             )
-            .map_err(|error| format!("failed to prepare research messages: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare research messages: {error}")))?;
         let items = statement
             .query_map(params![stock_code, unread_only, limit, offset], |row| {
                 Ok(ResearchMessage {
@@ -1116,19 +1176,19 @@ impl ResearchStore {
                     ),
                 })
             })
-            .map_err(|error| format!("failed to query research messages: {error}"))?
+            .map_err(|error| ce(format!("failed to query research messages: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read research messages: {error}"))?;
+            .map_err(|error| ce(format!("failed to read research messages: {error}")))?;
         Ok(json!({"items": items, "limit": limit, "offset": offset}))
     }
 
-    pub(crate) fn mark_read(&self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn mark_read(&self, request: &Value) -> Result<Value, CommandError> {
         let message_ids = normalized_string_array(request.get("message_ids"));
         let stock_code = string_field(request, "stock_code");
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start unread update: {error}"))?;
+            .map_err(|error| ce(format!("failed to start unread update: {error}")))?;
         let mut updated = 0usize;
         if !message_ids.is_empty() {
             for message_id in message_ids {
@@ -1137,7 +1197,9 @@ impl ResearchStore {
                         "UPDATE research_messages SET unread = 0 WHERE id = ?1 AND unread = 1",
                         params![message_id],
                     )
-                    .map_err(|error| format!("failed to mark research message read: {error}"))?;
+                    .map_err(|error| {
+                        ce(format!("failed to mark research message read: {error}"))
+                    })?;
             }
         } else if let Some(code) = stock_code {
             updated = transaction
@@ -1145,24 +1207,26 @@ impl ResearchStore {
                     "UPDATE research_messages SET unread = 0 WHERE stock_code = ?1 AND unread = 1",
                     params![code],
                 )
-                .map_err(|error| format!("failed to mark stock messages read: {error}"))?;
+                .map_err(|error| ce(format!("failed to mark stock messages read: {error}")))?;
         } else if bool_field(request, "all") {
             updated = transaction
                 .execute(
                     "UPDATE research_messages SET unread = 0 WHERE unread = 1",
                     [],
                 )
-                .map_err(|error| format!("failed to mark all messages read: {error}"))?;
+                .map_err(|error| ce(format!("failed to mark all messages read: {error}")))?;
         } else {
-            return Err("message_ids, stock_code, or all=true is required".to_string());
+            return Err(ce(
+                "message_ids, stock_code, or all=true is required".to_string()
+            ));
         }
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit unread update: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit unread update: {error}")))?;
         Ok(json!({"updated": updated}))
     }
 
-    pub(crate) fn create_thread(&self, request: &Value) -> Result<Value, String> {
+    pub(crate) fn create_thread(&self, request: &Value) -> Result<Value, CommandError> {
         let created_at = epoch_millis();
         let id = string_field(request, "id")
             .unwrap_or_else(|| format!("thread-{created_at}-{}", unique_suffix()));
@@ -1176,7 +1240,7 @@ impl ResearchStore {
                  ) VALUES (?1, ?2, ?3, ?4, ?4)",
                 params![id, title, stock_code, created_at],
             )
-            .map_err(|error| format!("failed to create research thread: {error}"))?;
+            .map_err(|error| ce(format!("failed to create research thread: {error}")))?;
         serde_json::to_value(ResearchThread {
             id,
             title,
@@ -1184,17 +1248,17 @@ impl ResearchStore {
             created_at_epoch_ms: created_at,
             updated_at_epoch_ms: created_at,
         })
-        .map_err(|error| format!("failed to encode research thread: {error}"))
+        .map_err(|error| ce(format!("failed to encode research thread: {error}")))
     }
 
-    pub(crate) fn threads(&self) -> Result<Value, String> {
+    pub(crate) fn threads(&self) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
                 "SELECT id, title, stock_code, created_at_epoch_ms, updated_at_epoch_ms
                  FROM research_threads ORDER BY updated_at_epoch_ms DESC",
             )
-            .map_err(|error| format!("failed to prepare research threads: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare research threads: {error}")))?;
         let items = statement
             .query_map([], |row| {
                 Ok(ResearchThread {
@@ -1205,13 +1269,13 @@ impl ResearchStore {
                     updated_at_epoch_ms: row.get(4)?,
                 })
             })
-            .map_err(|error| format!("failed to query research threads: {error}"))?
+            .map_err(|error| ce(format!("failed to query research threads: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read research threads: {error}"))?;
+            .map_err(|error| ce(format!("failed to read research threads: {error}")))?;
         Ok(json!({"items": items}))
     }
 
-    pub(crate) fn thread(&self, thread_id: &str) -> Result<Value, String> {
+    pub(crate) fn thread(&self, thread_id: &str) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let thread = connection
             .query_row(
@@ -1229,14 +1293,16 @@ impl ResearchStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("failed to read research thread: {error}"))?
-            .ok_or_else(|| "research thread not found".to_string())?;
+            .map_err(|error| ce(format!("failed to read research thread: {error}")))?
+            .ok_or_else(|| {
+                CommandError::new(codes::RESEARCH_NOT_FOUND, "research thread not found")
+            })?;
         let mut answer_statement = connection
             .prepare(
                 "SELECT id, question, answer, mode, created_at_epoch_ms
                  FROM research_answers WHERE thread_id = ?1 ORDER BY created_at_epoch_ms",
             )
-            .map_err(|error| format!("failed to prepare research answers: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare research answers: {error}")))?;
         let answer_rows = answer_statement
             .query_map(params![thread_id], |row| {
                 Ok((
@@ -1247,9 +1313,9 @@ impl ResearchStore {
                     row.get::<_, i64>(4)?,
                 ))
             })
-            .map_err(|error| format!("failed to query research answers: {error}"))?
+            .map_err(|error| ce(format!("failed to query research answers: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read research answers: {error}"))?;
+            .map_err(|error| ce(format!("failed to read research answers: {error}")))?;
         let mut answers = Vec::new();
         for (answer_id, question, answer, mode, created_at_epoch_ms) in answer_rows {
             let citations = self.answer_citations(&connection, &answer_id)?;
@@ -1266,11 +1332,11 @@ impl ResearchStore {
         Ok(json!({"thread": thread, "answers": answers}))
     }
 
-    pub(crate) fn delete_thread(&self, thread_id: &str) -> Result<usize, String> {
+    pub(crate) fn delete_thread(&self, thread_id: &str) -> Result<usize, CommandError> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start research thread deletion: {error}"))?;
+            .map_err(|error| ce(format!("failed to start research thread deletion: {error}")))?;
         let affected_document_ids = {
             let mut statement = transaction
                 .prepare(
@@ -1284,9 +1350,17 @@ impl ResearchStore {
                 })?;
             let rows = statement
                 .query_map(params![thread_id], |row| row.get::<_, String>(0))
-                .map_err(|error| format!("failed to query cited documents for deletion: {error}"))?
+                .map_err(|error| {
+                    ce(format!(
+                        "failed to query cited documents for deletion: {error}"
+                    ))
+                })?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("failed to read cited documents for deletion: {error}"))?;
+                .map_err(|error| {
+                    ce(format!(
+                        "failed to read cited documents for deletion: {error}"
+                    ))
+                })?;
             rows
         };
         let deleted = transaction
@@ -1294,9 +1368,12 @@ impl ResearchStore {
                 "DELETE FROM research_threads WHERE id = ?1",
                 params![thread_id],
             )
-            .map_err(|error| format!("failed to delete research thread: {error}"))?;
+            .map_err(|error| ce(format!("failed to delete research thread: {error}")))?;
         if deleted == 0 {
-            return Err("research thread not found".to_string());
+            return Err(CommandError::new(
+                codes::RESEARCH_NOT_FOUND,
+                "research thread not found",
+            ));
         }
         for document_id in affected_document_ids {
             transaction
@@ -1309,11 +1386,15 @@ impl ResearchStore {
                      WHERE id = ?1",
                     params![document_id],
                 )
-                .map_err(|error| format!("failed to reconcile cited document count: {error}"))?;
+                .map_err(|error| {
+                    ce(format!("failed to reconcile cited document count: {error}"))
+                })?;
         }
-        transaction
-            .commit()
-            .map_err(|error| format!("failed to commit research thread deletion: {error}"))?;
+        transaction.commit().map_err(|error| {
+            ce(format!(
+                "failed to commit research thread deletion: {error}"
+            ))
+        })?;
         Ok(deleted)
     }
 
@@ -1322,7 +1403,7 @@ impl ResearchStore {
         thread_id: &str,
         question: &str,
         response: &Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let answer_text = string_field(response, "answer").unwrap_or_default();
         let mode = string_field(response, "mode").unwrap_or_else(|| "evidence_only".to_string());
         let citations = response
@@ -1333,22 +1414,25 @@ impl ResearchStore {
             .into_iter()
             .map(serde_json::from_value::<ResearchCitation>)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("invalid research citation: {error}"))?;
+            .map_err(|error| ce(format!("invalid research citation: {error}")))?;
         let created_at = epoch_millis();
         let answer_id = format!("answer-{created_at}-{}", unique_suffix());
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start answer save: {error}"))?;
+            .map_err(|error| ce(format!("failed to start answer save: {error}")))?;
         let thread_exists: bool = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM research_threads WHERE id = ?1)",
                 params![thread_id],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to validate research thread: {error}"))?;
+            .map_err(|error| ce(format!("failed to validate research thread: {error}")))?;
         if !thread_exists {
-            return Err("research thread not found".to_string());
+            return Err(CommandError::new(
+                codes::RESEARCH_NOT_FOUND,
+                "research thread not found",
+            ));
         }
         transaction
             .execute(
@@ -1364,13 +1448,13 @@ impl ResearchStore {
                     created_at
                 ],
             )
-            .map_err(|error| format!("failed to store research answer: {error}"))?;
+            .map_err(|error| ce(format!("failed to store research answer: {error}")))?;
         for (ordinal, citation) in citations.iter().enumerate() {
             if citation.unavailable {
-                return Err(
+                return Err(ce(
                     "unavailable historical evidence cannot be saved as an active citation"
                         .to_string(),
-                );
+                ));
             }
             transaction
                 .execute(
@@ -1389,40 +1473,40 @@ impl ResearchStore {
                         citation.retrieval_score
                     ],
                 )
-                .map_err(|error| format!("failed to store answer citation: {error}"))?;
+                .map_err(|error| ce(format!("failed to store answer citation: {error}")))?;
             transaction
                 .execute(
                     "UPDATE documents SET cited_count = cited_count + 1 WHERE id = ?1",
                     params![citation.document_id],
                 )
-                .map_err(|error| format!("failed to retain cited document: {error}"))?;
+                .map_err(|error| ce(format!("failed to retain cited document: {error}")))?;
         }
         transaction
             .execute(
                 "UPDATE research_threads SET updated_at_epoch_ms = ?2 WHERE id = ?1",
                 params![thread_id, created_at],
             )
-            .map_err(|error| format!("failed to update research thread: {error}"))?;
+            .map_err(|error| ce(format!("failed to update research thread: {error}")))?;
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit research answer: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit research answer: {error}")))?;
         Ok(json!({"id": answer_id, "saved": true}))
     }
 
-    pub(crate) fn index_status(&self) -> Result<Value, String> {
+    pub(crate) fn index_status(&self) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let document_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count research documents: {error}"))?;
+            .map_err(|error| ce(format!("failed to count research documents: {error}")))?;
         let chunk_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count research chunks: {error}"))?;
+            .map_err(|error| ce(format!("failed to count research chunks: {error}")))?;
         let fts_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count FTS rows: {error}"))?;
+            .map_err(|error| ce(format!("failed to count FTS rows: {error}")))?;
         let embedding_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))
-            .map_err(|error| format!("failed to count embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to count embeddings: {error}")))?;
         let missing_fts_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM chunks c
@@ -1431,7 +1515,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count missing FTS rows: {error}"))?;
+            .map_err(|error| ce(format!("failed to count missing FTS rows: {error}")))?;
         let orphan_fts_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM chunks_fts f
@@ -1440,7 +1524,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count orphan FTS rows: {error}"))?;
+            .map_err(|error| ce(format!("failed to count orphan FTS rows: {error}")))?;
         let pending_embedding_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM chunks c
@@ -1449,7 +1533,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count pending embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to count pending embeddings: {error}")))?;
         let stale_embedding_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM chunks c
@@ -1458,7 +1542,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count stale embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to count stale embeddings: {error}")))?;
         let orphan_embedding_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM embeddings e
@@ -1467,7 +1551,7 @@ impl ResearchStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count orphan embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to count orphan embeddings: {error}")))?;
         let invalid_embedding_count: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM embeddings
@@ -1475,7 +1559,7 @@ impl ResearchStore {
                 params![RESEARCH_EMBEDDING_DIMENSIONS, RESEARCH_EMBEDDING_BLOB_BYTES],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("failed to count invalid embeddings: {error}"))?;
+            .map_err(|error| ce(format!("failed to count invalid embeddings: {error}")))?;
         let database_bytes = fs::metadata(&self.path)
             .map(|value| value.len())
             .unwrap_or(0);
@@ -1513,7 +1597,7 @@ impl ResearchStore {
         }))
     }
 
-    pub(crate) fn document_statuses(&self) -> Result<Value, String> {
+    pub(crate) fn document_statuses(&self) -> Result<Value, CommandError> {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
@@ -1525,7 +1609,7 @@ impl ResearchStore {
                  GROUP BY d.id, d.title, d.source_tier, d.updated_at_epoch_ms
                  ORDER BY d.updated_at_epoch_ms DESC LIMIT 1000",
             )
-            .map_err(|error| format!("failed to prepare document statuses: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare document statuses: {error}")))?;
         let items = statement
             .query_map([], |row| {
                 let chunk_count = row.get::<_, i64>(4)?.max(0) as usize;
@@ -1540,23 +1624,23 @@ impl ResearchStore {
                     updated_at_epoch_ms: row.get(3)?,
                 })
             })
-            .map_err(|error| format!("failed to query document statuses: {error}"))?
+            .map_err(|error| ce(format!("failed to query document statuses: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read document statuses: {error}"))?;
+            .map_err(|error| ce(format!("failed to read document statuses: {error}")))?;
         Ok(json!({"items": items}))
     }
 
-    pub(crate) fn rebuild_fts(&self) -> Result<Value, String> {
+    pub(crate) fn rebuild_fts(&self) -> Result<Value, CommandError> {
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
-            .map_err(|error| format!("failed to start FTS rebuild: {error}"))?;
+            .map_err(|error| ce(format!("failed to start FTS rebuild: {error}")))?;
         let chunks = {
             let mut statement = transaction
                 .prepare(
                     "SELECT id, title, entities_json, content FROM chunks ORDER BY document_id, ordinal",
                 )
-                .map_err(|error| format!("failed to prepare chunks for FTS rebuild: {error}"))?;
+                .map_err(|error| ce(format!("failed to prepare chunks for FTS rebuild: {error}")))?;
             let rows = statement
                 .query_map([], |row| {
                     Ok((
@@ -1566,14 +1650,14 @@ impl ResearchStore {
                         row.get::<_, String>(3)?,
                     ))
                 })
-                .map_err(|error| format!("failed to query chunks for FTS rebuild: {error}"))?
+                .map_err(|error| ce(format!("failed to query chunks for FTS rebuild: {error}")))?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("failed to read chunks for FTS rebuild: {error}"))?;
+                .map_err(|error| ce(format!("failed to read chunks for FTS rebuild: {error}")))?;
             rows
         };
         transaction
             .execute("DELETE FROM chunks_fts", [])
-            .map_err(|error| format!("failed to clear FTS index: {error}"))?;
+            .map_err(|error| ce(format!("failed to clear FTS index: {error}")))?;
         for (chunk_id, title, entities_json, content) in &chunks {
             let entities = serde_json::from_str::<Vec<String>>(entities_json).unwrap_or_default();
             transaction
@@ -1587,11 +1671,11 @@ impl ResearchStore {
                         tokenize_for_fts(content)
                     ],
                 )
-                .map_err(|error| format!("failed to rebuild FTS row: {error}"))?;
+                .map_err(|error| ce(format!("failed to rebuild FTS row: {error}")))?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("failed to commit FTS rebuild: {error}"))?;
+            .map_err(|error| ce(format!("failed to commit FTS rebuild: {error}")))?;
         Ok(json!({"rebuilt": chunks.len(), "schema_version": RESEARCH_SCHEMA_VERSION}))
     }
 
@@ -1599,7 +1683,7 @@ impl ResearchStore {
         &self,
         connection: &Connection,
         answer_id: &str,
-    ) -> Result<Vec<ResearchCitation>, String> {
+    ) -> Result<Vec<ResearchCitation>, CommandError> {
         let mut statement = connection
             .prepare(
                 "SELECT ac.citation_id, c.document_id, c.id, c.title, c.content,
@@ -1610,7 +1694,7 @@ impl ResearchStore {
                  JOIN documents d ON d.id = c.document_id
                  WHERE ac.answer_id = ?1 ORDER BY ac.ordinal",
             )
-            .map_err(|error| format!("failed to prepare stored citations: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare stored citations: {error}")))?;
         let mut citations = statement
             .query_map(params![answer_id], |row| {
                 let content: String = row.get(4)?;
@@ -1632,33 +1716,34 @@ impl ResearchStore {
                     remote_export_allowed: row.get::<_, i64>(13)? != 0,
                 })
             })
-            .map_err(|error| format!("failed to query stored citations: {error}"))?
+            .map_err(|error| ce(format!("failed to query stored citations: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read stored citations: {error}"))?;
+            .map_err(|error| ce(format!("failed to read stored citations: {error}")))?;
         let mut snapshots = connection.prepare(
             "SELECT payload_json FROM research_unavailable_citations WHERE answer_id=?1 ORDER BY ordinal"
-        ).map_err(|error| error.to_string())?;
+        ).map_err(|error| ce(error.to_string()))?;
         let payloads = snapshots
             .query_map([answer_id], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ce(error.to_string()))?;
         for payload in payloads {
-            let mut citation: ResearchCitation =
-                serde_json::from_str(&payload.map_err(|error| error.to_string())?)
-                    .map_err(|error| format!("invalid historical citation snapshot: {error}"))?;
+            let mut citation: ResearchCitation = serde_json::from_str(
+                &payload.map_err(|error| ce(error.to_string()))?,
+            )
+            .map_err(|error| ce(format!("invalid historical citation snapshot: {error}")))?;
             citation.unavailable = true;
             citations.push(citation);
         }
         let mut ordinals = connection.prepare(
             "SELECT citation_id,ordinal FROM research_answer_citations WHERE answer_id=?1
              UNION ALL SELECT citation_id,ordinal FROM research_unavailable_citations WHERE answer_id=?1"
-        ).map_err(|error| error.to_string())?;
+        ).map_err(|error| ce(error.to_string()))?;
         let order = ordinals
             .query_map([answer_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })
-            .map_err(|error| error.to_string())?
+            .map_err(|error| ce(error.to_string()))?
             .collect::<Result<HashMap<_, _>, _>>()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ce(error.to_string()))?;
         citations.sort_by_key(|citation| {
             order
                 .get(&citation.citation_id)
@@ -1673,7 +1758,7 @@ impl ResearchStore {
         &self,
         stock_code: &str,
         cutoff: i64,
-    ) -> Result<Vec<Value>, String> {
+    ) -> Result<Vec<Value>, CommandError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT d.id,d.title,d.content,d.source_tier,d.source_name,d.url,d.published_at,
@@ -1683,7 +1768,7 @@ impl ResearchStore {
                AND (EXISTS(SELECT 1 FROM chunks sc,json_each(sc.stock_codes_json) code WHERE sc.document_id=d.id AND code.value=?1)
                     OR EXISTS(SELECT 1 FROM json_each(d.metadata_json,'$.mapped_stock_codes') code WHERE code.value=?1))
              ORDER BY d.published_at DESC,d.id LIMIT 10000"
-        ).map_err(|error| error.to_string())?;
+        ).map_err(|error| ce(error.to_string()))?;
         let rows = statement.query_map(params![stock_code, cutoff], |row| {
             let metadata: String = row.get(9)?;
             let codes: String = row.get(11)?;
@@ -1695,70 +1780,81 @@ impl ResearchStore {
                 "updated_at":row.get::<_,i64>(8)?, "metadata":serde_json::from_str::<Value>(&metadata).unwrap_or(json!({})),
                 "sentiment":row.get::<_,String>(10)?, "stock_codes":serde_json::from_str::<Value>(&codes).unwrap_or(json!([]))
             }))
-        }).map_err(|error| error.to_string())?;
+        }).map_err(|error| ce(error.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())
+            .map_err(|error| ce(error.to_string()))
     }
 
-    pub(crate) fn sentiment_generation(&self) -> Result<String, String> {
+    pub(crate) fn sentiment_generation(&self) -> Result<String, CommandError> {
         let connection = self.connection()?;
         connection.execute("INSERT OR IGNORE INTO research_metadata(key,value) VALUES('sentiment_generation',?1)",
-            [format!("{}-{}", epoch_millis(), unique_suffix())]).map_err(|error| error.to_string())?;
+            [format!("{}-{}", epoch_millis(), unique_suffix())]).map_err(|error| ce(error.to_string()))?;
         connection
             .query_row(
                 "SELECT value FROM research_metadata WHERE key='sentiment_generation'",
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| error.to_string())
+            .map_err(|error| ce(error.to_string()))
     }
 
-    fn reset_sentiment_generation(&self) -> Result<(), String> {
+    fn reset_sentiment_generation(&self) -> Result<(), CommandError> {
         self.connection()?.execute("INSERT OR REPLACE INTO research_metadata(key,value) VALUES('sentiment_generation',?1)",
-            [format!("{}-{}", epoch_millis(), unique_suffix())]).map_err(|error| error.to_string())?;
+            [format!("{}-{}", epoch_millis(), unique_suffix())]).map_err(|error| ce(error.to_string()))?;
         Ok(())
     }
 
-    fn connection(&self) -> Result<Connection, String> {
+    fn connection(&self) -> Result<Connection, CommandError> {
         let connection =
             Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-                .map_err(|error| format!("failed to open research database: {error}"))?;
+                .map_err(|error| {
+                    CommandError::new(
+                        codes::RESEARCH_SQLITE,
+                        format!("failed to open research database: {error}"),
+                    )
+                })?;
         configure_connection(&connection)?;
         Ok(connection)
     }
 }
 
-fn open_app_store(app: &tauri::AppHandle) -> Result<ResearchStore, String> {
+fn open_app_store(app: &tauri::AppHandle) -> Result<ResearchStore, CommandError> {
     let migration_lock = LEGACY_MIGRATION_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = migration_lock
         .lock()
-        .map_err(|_| "legacy research migration lock is poisoned".to_string())?;
+        .map_err(|_| ce("legacy research migration lock is poisoned".to_string()))?;
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?;
     let research_dir = app_data.join("research");
     fs::create_dir_all(&research_dir)
-        .map_err(|error| format!("failed to create research directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to create research directory: {error}")))?;
     let store = ResearchStore::open(research_dir.join("research.sqlite"))?;
     migrate_legacy_sources(&store, &app_data)?;
     Ok(store)
 }
 
-pub(crate) fn with_app_store<T>(
+pub(crate) fn with_app_store<T, E>(
     app: &tauri::AppHandle,
-    operation: impl FnOnce(&ResearchStore) -> Result<T, String>,
-) -> Result<T, String> {
+    operation: impl FnOnce(&ResearchStore) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<String> + From<CommandError>,
+{
     with_recovered_app_database(app, || {
         let store = open_app_store(app)?;
         operation(&store)
     })
 }
 
-pub(crate) fn with_app_store_snapshot<T>(
+pub(crate) fn with_app_store_snapshot<T, E>(
     app: &tauri::AppHandle,
-    operation: impl FnOnce(&ResearchStore) -> Result<T, String>,
-) -> Result<(u64, T), String> {
+    operation: impl FnOnce(&ResearchStore) -> Result<T, E>,
+) -> Result<(u64, T), E>
+where
+    E: From<String> + From<CommandError>,
+{
     with_recovered_app_database(app, || {
         let generation = APP_RESEARCH_DATABASE_GENERATION.load(AtomicOrdering::Acquire);
         let store = open_app_store(app)?;
@@ -1766,11 +1862,14 @@ pub(crate) fn with_app_store_snapshot<T>(
     })
 }
 
-pub(crate) fn with_app_store_at_generation<T>(
+pub(crate) fn with_app_store_at_generation<T, E>(
     app: &tauri::AppHandle,
     expected_generation: u64,
-    operation: impl FnOnce(&ResearchStore) -> Result<T, String>,
-) -> Result<T, String> {
+    operation: impl FnOnce(&ResearchStore) -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<String> + From<CommandError>,
+{
     with_recovered_app_database(app, || {
         ensure_app_database_generation(expected_generation)?;
         let store = open_app_store(app)?;
@@ -1778,23 +1877,26 @@ pub(crate) fn with_app_store_at_generation<T>(
     })
 }
 
-fn ensure_app_database_generation(expected_generation: u64) -> Result<(), String> {
+fn ensure_app_database_generation(expected_generation: u64) -> Result<(), CommandError> {
     if APP_RESEARCH_DATABASE_GENERATION.load(AtomicOrdering::Acquire) != expected_generation {
-        return Err(
-            "research database changed while the answer was generated; retry the query".to_string(),
-        );
+        return Err(ce(
+            "research database changed while the answer was generated; retry the query",
+        ));
     }
     Ok(())
 }
 
-fn with_recovered_app_database<T>(
+fn with_recovered_app_database<T, E>(
     app: &tauri::AppHandle,
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<String> + From<CommandError>,
+{
     let directory = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?
         .join("research");
     let mut operation = Some(operation);
     loop {
@@ -1818,27 +1920,28 @@ fn with_recovered_app_database<T>(
     }
 }
 
-fn recover_research_files(research_dir: &Path) -> Result<(), String> {
-    recovery::recover(research_dir)
+fn recover_research_files(research_dir: &Path) -> Result<(), CommandError> {
+    recovery::recover(research_dir).map_err(ce)
 }
 
-pub(crate) fn ingest_news_cache(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn ingest_news_cache(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?;
     let path = app_data.join("news").join("news-cache.json");
     with_app_store(app, |store| ingest_news_cache_file(store, &path))
 }
 
-fn ingest_news_cache_file(store: &ResearchStore, path: &Path) -> Result<Value, String> {
+fn ingest_news_cache_file(store: &ResearchStore, path: &Path) -> Result<Value, CommandError> {
     let documents = legacy_documents_from_file(path)?;
     let result = store.ingest_documents(&documents)?;
     let refresh_epoch_ms = if path.exists() {
-        serde_json::from_slice::<Value>(
-            &fs::read(path)
-                .map_err(|error| format!("failed to read news cache refresh metadata: {error}"))?,
-        )
+        serde_json::from_slice::<Value>(&fs::read(path).map_err(|error| {
+            ce(format!(
+                "failed to read news cache refresh metadata: {error}"
+            ))
+        })?)
         .ok()
         .and_then(|value| value.get("updated_at_epoch_ms").and_then(Value::as_i64))
     } else {
@@ -1852,16 +1955,19 @@ fn ingest_news_cache_file(store: &ResearchStore, path: &Path) -> Result<Value, S
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![refresh_epoch_ms.to_string()],
             )
-            .map_err(|error| format!("failed to record news refresh time: {error}"))?;
+            .map_err(|error| ce(format!("failed to record news refresh time: {error}")))?;
     }
     Ok(result)
 }
 
-pub(crate) fn export_app_pack(app: &tauri::AppHandle, payload: &Value) -> Result<Value, String> {
+pub(crate) fn export_app_pack(
+    app: &tauri::AppHandle,
+    payload: &Value,
+) -> Result<Value, CommandError> {
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?;
     let destination = string_field(payload, "path")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -1873,7 +1979,10 @@ pub(crate) fn export_app_pack(app: &tauri::AppHandle, payload: &Value) -> Result
     with_app_store(app, |store| store.export_portable_pack(&destination))
 }
 
-pub(crate) fn import_app_pack(app: &tauri::AppHandle, payload: &Value) -> Result<Value, String> {
+pub(crate) fn import_app_pack(
+    app: &tauri::AppHandle,
+    payload: &Value,
+) -> Result<Value, CommandError> {
     with_exclusive_app_database(|| {
         let result = import_app_pack_unlocked(app, payload)?;
         open_app_store(app)?.reset_sentiment_generation()?;
@@ -1881,14 +1990,17 @@ pub(crate) fn import_app_pack(app: &tauri::AppHandle, payload: &Value) -> Result
     })
 }
 
-fn import_app_pack_unlocked(app: &tauri::AppHandle, payload: &Value) -> Result<Value, String> {
+fn import_app_pack_unlocked(
+    app: &tauri::AppHandle,
+    payload: &Value,
+) -> Result<Value, CommandError> {
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?;
     let research_dir = app_data.join("research");
     fs::create_dir_all(&research_dir)
-        .map_err(|error| format!("failed to create research directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to create research directory: {error}")))?;
     recover_research_files(&research_dir)?;
     let mut temporary_source = None;
     let source_path = if let Some(path) = string_field(payload, "path") {
@@ -1896,11 +2008,13 @@ fn import_app_pack_unlocked(app: &tauri::AppHandle, payload: &Value) -> Result<V
     } else if let Some(encoded) = string_field(payload, "bytes_base64") {
         use base64::{engine::general_purpose, Engine as _};
         if encoded.len() > (MAX_PACK_BYTES as usize * 4 / 3 + 4) {
-            return Err("research pack exceeds the 64 MB safety limit".to_string());
+            return Err(ce(
+                "research pack exceeds the 64 MB safety limit".to_string()
+            ));
         }
         let bytes = general_purpose::STANDARD
             .decode(encoded)
-            .map_err(|error| format!("invalid research pack base64: {error}"))?;
+            .map_err(|error| ce(format!("invalid research pack base64: {error}")))?;
         let path = research_dir.join(format!(
             "incoming-pack-{}-{}.sqlite",
             epoch_millis(),
@@ -1910,7 +2024,7 @@ fn import_app_pack_unlocked(app: &tauri::AppHandle, payload: &Value) -> Result<V
         temporary_source = Some(path.clone());
         path
     } else {
-        return Err("path or bytes_base64 is required".to_string());
+        return Err(ce("path or bytes_base64 is required".to_string()));
     };
 
     let result = read_portable_pack(&source_path)
@@ -1921,9 +2035,14 @@ fn import_app_pack_unlocked(app: &tauri::AppHandle, payload: &Value) -> Result<V
     result
 }
 
-fn import_research_documents(research_dir: &Path, documents: &[Value]) -> Result<Value, String> {
+fn import_research_documents(
+    research_dir: &Path,
+    documents: &[Value],
+) -> Result<Value, CommandError> {
     if documents.is_empty() {
-        return Err("research pack does not contain any documents".to_string());
+        return Err(ce(
+            "research pack does not contain any documents".to_string()
+        ));
     }
     recovery::deliver(research_dir, |staging_path| {
         let staging = ResearchStore::open(staging_path)?;
@@ -1931,8 +2050,8 @@ fn import_research_documents(research_dir: &Path, documents: &[Value]) -> Result
         preserve_local_research_state(&research_dir.join("research.sqlite"), &staging)?;
         staging.connection()?.execute(
             "INSERT OR REPLACE INTO research_metadata(key,value) VALUES('legacy_v1_import_complete','true')", []
-        ).map_err(|error| error.to_string())?;
-        staging.rebuild_fts().map(|_| ())
+        ).map_err(|error| ce(error.to_string()))?;
+        staging.rebuild_fts().map(|_| ()).map_err(String::from)
     })?;
     Ok(json!({
         "schema_version": RESEARCH_PACK_SCHEMA_VERSION,
@@ -1948,7 +2067,7 @@ fn import_research_documents(research_dir: &Path, documents: &[Value]) -> Result
 fn preserve_local_research_state(
     previous_path: &Path,
     staging: &ResearchStore,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     // The source must exist: a missing authoritative DB is not an empty history.
     recovery::validate_database(previous_path)?;
     let previous = ResearchStore::open(previous_path)?;
@@ -1959,11 +2078,15 @@ fn preserve_local_research_state(
             "ATTACH DATABASE ?1 AS previous_research",
             params![previous_path.to_string_lossy()],
         )
-        .map_err(|error| format!("failed to attach previous research database: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to attach previous research database: {error}"
+            ))
+        })?;
     let result = (|| {
         let transaction = destination
             .transaction()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ce(error.to_string()))?;
         transaction.execute_batch(
             "DELETE FROM research_unavailable_citations;
              DELETE FROM research_answer_citations;
@@ -1994,15 +2117,15 @@ fn preserve_local_research_state(
              INSERT OR REPLACE INTO research_metadata(key,value)
                  SELECT key,value FROM previous_research.research_metadata
                  WHERE key IN ('legacy_v1_import_complete','legacy_v1_archive_complete');"
-        ).map_err(|error| format!("failed to replace local research state: {error}"))?;
+        ).map_err(|error| ce(format!("failed to replace local research state: {error}")))?;
         let mut answers = source
             .prepare("SELECT id FROM research_answers")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ce(error.to_string()))?;
         let ids = answers
             .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| ce(error.to_string()))?;
         for id in ids {
-            let id = id.map_err(|error| error.to_string())?;
+            let id = id.map_err(|error| ce(error.to_string()))?;
             for (ordinal, mut citation) in previous
                 .answer_citations(&source, &id)?
                 .into_iter()
@@ -2011,24 +2134,28 @@ fn preserve_local_research_state(
                 let retained: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM research_answer_citations WHERE answer_id=?1 AND citation_id=?2)",
                     params![id, citation.citation_id], |row| row.get(0)
-                ).map_err(|error| error.to_string())?;
+                ).map_err(|error| ce(error.to_string()))?;
                 if !retained {
                     citation.unavailable = true;
                     transaction.execute(
                         "INSERT INTO research_unavailable_citations(answer_id,citation_id,ordinal,payload_json) VALUES(?1,?2,?3,?4)",
-                        params![id, citation.citation_id, ordinal as i64, serde_json::to_string(&citation).map_err(|error| error.to_string())?]
-                    ).map_err(|error| error.to_string())?;
+                        params![id, citation.citation_id, ordinal as i64, serde_json::to_string(&citation).map_err(|error| ce(error.to_string()))?]
+                    ).map_err(|error| ce(error.to_string()))?;
                 }
             }
         }
-        transaction.commit().map_err(|error| error.to_string())
+        transaction.commit().map_err(|error| ce(error.to_string()))
     })();
     let detach = destination.execute_batch("DETACH DATABASE previous_research;");
     result?;
-    detach.map_err(|error| format!("failed to detach previous research database: {error}"))
+    detach.map_err(|error| {
+        ce(format!(
+            "failed to detach previous research database: {error}"
+        ))
+    })
 }
 
-pub(crate) fn rollback_app_pack(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn rollback_app_pack(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     with_exclusive_app_database(|| {
         let result = rollback_app_pack_unlocked(app)?;
         open_app_store(app)?.reset_sentiment_generation()?;
@@ -2036,36 +2163,36 @@ pub(crate) fn rollback_app_pack(app: &tauri::AppHandle) -> Result<Value, String>
     })
 }
 
-fn rollback_app_pack_unlocked(app: &tauri::AppHandle) -> Result<Value, String> {
+fn rollback_app_pack_unlocked(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     let app_data = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve app data directory: {error}")))?;
     let research_dir = app_data.join("research");
     rollback_research_documents(&research_dir)
 }
 
-fn rollback_research_documents(research_dir: &Path) -> Result<Value, String> {
+fn rollback_research_documents(research_dir: &Path) -> Result<Value, CommandError> {
     recover_research_files(research_dir)?;
     let rollback_path = recovery::rollback_source(research_dir)?;
     recovery::validate_database(&rollback_path)?;
     recovery::deliver(research_dir, |staging_path| {
         let old =
             Connection::open_with_flags(&rollback_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| ce(error.to_string()))?;
         crate::durability::snapshot_sqlite(&old, staging_path)?;
         drop(old);
         let staging = ResearchStore::open(staging_path)?;
         // Discard every old user row before copying CURRENT authority, including deletions.
         preserve_local_research_state(&research_dir.join("research.sqlite"), &staging)?;
-        staging.rebuild_fts().map(|_| ())
+        staging.rebuild_fts().map(|_| ()).map_err(String::from)
     })?;
     Ok(
         json!({"rolled_back":true, "replaced_database":recovery::rollback_source(research_dir)?.display().to_string()}),
     )
 }
 
-fn remove_sqlite_files(path: &Path) -> Result<(), String> {
+fn remove_sqlite_files(path: &Path) -> Result<(), CommandError> {
     if path.exists() {
         fs::remove_file(path).map_err(|error| {
             format!(
@@ -2077,7 +2204,7 @@ fn remove_sqlite_files(path: &Path) -> Result<(), String> {
     remove_sqlite_sidecars(path)
 }
 
-fn remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
+fn remove_sqlite_sidecars(path: &Path) -> Result<(), CommandError> {
     let base = path.display().to_string();
     for sidecar in [format!("{base}-wal"), format!("{base}-shm")] {
         let sidecar = PathBuf::from(sidecar);
@@ -2093,7 +2220,7 @@ fn remove_sqlite_sidecars(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), String> {
+fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), CommandError> {
     let connection = store.connection()?;
     let imported = connection
         .query_row(
@@ -2102,7 +2229,7 @@ fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), 
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|error| format!("failed to read migration state: {error}"))?
+        .map_err(|error| ce(format!("failed to read migration state: {error}")))?
         .as_deref()
         == Some("true");
     let archived = connection
@@ -2112,7 +2239,7 @@ fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), 
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|error| format!("failed to read legacy archive state: {error}"))?
+        .map_err(|error| ce(format!("failed to read legacy archive state: {error}")))?
         .as_deref()
         == Some("true");
 
@@ -2134,7 +2261,7 @@ fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), 
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [],
             )
-            .map_err(|error| format!("failed to record migration state: {error}"))?;
+            .map_err(|error| ce(format!("failed to record migration state: {error}")))?;
     }
     if !archived {
         archive_legacy_sources(app_data, &paths)?;
@@ -2144,7 +2271,7 @@ fn migrate_legacy_sources(store: &ResearchStore, app_data: &Path) -> Result<(), 
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [],
             )
-            .map_err(|error| format!("failed to record legacy archive state: {error}"))?;
+            .map_err(|error| ce(format!("failed to record legacy archive state: {error}")))?;
     }
     Ok(())
 }
@@ -2163,7 +2290,7 @@ fn legacy_source_paths(app_data: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn archive_legacy_sources(app_data: &Path, paths: &[PathBuf]) -> Result<(), String> {
+fn archive_legacy_sources(app_data: &Path, paths: &[PathBuf]) -> Result<(), CommandError> {
     let archive_root = app_data.join("research").join("legacy-v1");
     for source in paths {
         let relative = source.strip_prefix(app_data).map_err(|error| {
@@ -2196,10 +2323,10 @@ fn archive_legacy_sources(app_data: &Path, paths: &[PathBuf]) -> Result<(), Stri
         }
         if source.exists() {
             if destination.exists() {
-                return Err(format!(
+                return Err(ce(format!(
                     "legacy archive destination already exists while source remains: {}",
                     destination.display()
-                ));
+                )));
             }
             fs::rename(source, &destination).map_err(|error| {
                 format!(
@@ -2211,10 +2338,10 @@ fn archive_legacy_sources(app_data: &Path, paths: &[PathBuf]) -> Result<(), Stri
 
         for (sidecar, sidecar_destination) in sidecars {
             if sidecar_destination.exists() {
-                return Err(format!(
+                return Err(ce(format!(
                     "legacy archive sidecar destination already exists while source remains: {}",
                     sidecar_destination.display()
-                ));
+                )));
             }
             fs::rename(&sidecar, &sidecar_destination).map_err(|error| {
                 format!(
@@ -2227,7 +2354,7 @@ fn archive_legacy_sources(app_data: &Path, paths: &[PathBuf]) -> Result<(), Stri
     Ok(())
 }
 
-fn legacy_documents_from_file(path: &Path) -> Result<Vec<Value>, String> {
+fn legacy_documents_from_file(path: &Path) -> Result<Vec<Value>, CommandError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -2240,7 +2367,9 @@ fn legacy_documents_from_file(path: &Path) -> Result<Vec<Value>, String> {
         })?
         .len();
     if size > MAX_PACK_BYTES {
-        return Err("legacy research source exceeds the 64 MB safety limit".to_string());
+        return Err(ce(
+            "legacy research source exceeds the 64 MB safety limit".to_string()
+        ));
     }
     let bytes = fs::read(path).map_err(|error| {
         format!(
@@ -2278,7 +2407,9 @@ fn legacy_documents_from_file(path: &Path) -> Result<Vec<Value>, String> {
         }
     }
     if candidates.len() > MAX_PACK_DOCUMENTS {
-        return Err("legacy research source contains too many documents".to_string());
+        return Err(ce(
+            "legacy research source contains too many documents".to_string()
+        ));
     }
     let path_hash = sha256_hex(path.display().to_string().as_bytes());
     let mut seen_ids = HashSet::new();
@@ -2306,7 +2437,7 @@ fn legacy_documents_from_file(path: &Path) -> Result<Vec<Value>, String> {
     Ok(documents)
 }
 
-fn validate_legacy_pack_version(value: &Value) -> Result<(), String> {
+fn validate_legacy_pack_version(value: &Value) -> Result<(), CommandError> {
     let supported = match value.get("schema_version") {
         Some(Value::Number(version)) => version.as_u64() == Some(1),
         Some(Value::String(version)) => matches!(
@@ -2316,12 +2447,15 @@ fn validate_legacy_pack_version(value: &Value) -> Result<(), String> {
         _ => false,
     };
     if !supported {
-        return Err("unsupported legacy research pack schema; expected v1".to_string());
+        return Err(CommandError::new(
+            codes::RESEARCH_PACK_INVALID,
+            "unsupported legacy research pack schema; expected v1",
+        ));
     }
     Ok(())
 }
 
-fn validate_legacy_candidate_size(item: &Value) -> Result<(), String> {
+fn validate_legacy_candidate_size(item: &Value) -> Result<(), CommandError> {
     let Some(object) = item.as_object() else {
         return Ok(());
     };
@@ -2347,17 +2481,19 @@ fn validate_legacy_candidate_size(item: &Value) -> Result<(), String> {
                 .map(|summary| format!("{title}\n{summary}"))
         });
     if content.is_some_and(|content| content.chars().count() > MAX_PACK_DOCUMENT_CHARS) {
-        return Err("legacy research pack contains an oversized document".to_string());
+        return Err(ce(
+            "legacy research pack contains an oversized document".to_string()
+        ));
     }
     Ok(())
 }
 
-fn validate_portable_documents(documents: &[Value]) -> Result<(), String> {
+fn validate_portable_documents(documents: &[Value]) -> Result<(), CommandError> {
     if documents.len() > MAX_PACK_DOCUMENTS {
-        return Err(format!(
+        return Err(ce(format!(
             "research pack contains {} documents; the limit is {MAX_PACK_DOCUMENTS}",
             documents.len()
-        ));
+        )));
     }
     let mut total_chars = 0usize;
     for document in documents {
@@ -2368,17 +2504,19 @@ fn validate_portable_documents(documents: &[Value]) -> Result<(), String> {
             .unwrap_or_default();
         let content_chars = content.chars().count();
         if content_chars > MAX_PACK_DOCUMENT_CHARS {
-            return Err("research pack contains an oversized document".to_string());
+            return Err(ce(
+                "research pack contains an oversized document".to_string()
+            ));
         }
         total_chars = total_chars.saturating_add(content_chars);
         if total_chars > MAX_PACK_BYTES as usize {
-            return Err("research pack contains too much text".to_string());
+            return Err(ce("research pack contains too much text".to_string()));
         }
     }
     Ok(())
 }
 
-fn read_portable_pack(path: &Path) -> Result<Vec<Value>, String> {
+fn read_portable_pack(path: &Path) -> Result<Vec<Value>, CommandError> {
     let size = fs::metadata(path)
         .map_err(|error| {
             format!(
@@ -2388,24 +2526,31 @@ fn read_portable_pack(path: &Path) -> Result<Vec<Value>, String> {
         })?
         .len();
     if size > MAX_PACK_BYTES {
-        return Err("research pack exceeds the 64 MB safety limit".to_string());
+        return Err(ce(
+            "research pack exceeds the 64 MB safety limit".to_string()
+        ));
     }
     let mut header = [0u8; 16];
     fs::File::open(path)
         .and_then(|mut file| file.read(&mut header))
-        .map_err(|error| format!("failed to read research pack {}: {error}", path.display()))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to read research pack {}: {error}",
+                path.display()
+            ))
+        })?;
     if !header.starts_with(b"SQLite format 3\0") {
         return legacy_documents_from_file(path);
     }
     let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| format!("failed to open SQLite v2 pack: {error}"))?;
+        .map_err(|error| ce(format!("failed to open SQLite v2 pack: {error}")))?;
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| format!("failed to read pack schema version: {error}"))?;
+        .map_err(|error| ce(format!("failed to read pack schema version: {error}")))?;
     if version != RESEARCH_PACK_SCHEMA_VERSION {
-        return Err(format!(
+        return Err(ce(format!(
             "unsupported research pack schema {version}; expected {RESEARCH_PACK_SCHEMA_VERSION}"
-        ));
+        )));
     }
     let format = connection
         .query_row(
@@ -2413,44 +2558,57 @@ fn read_portable_pack(path: &Path) -> Result<Vec<Value>, String> {
             [],
             |row| row.get::<_, String>(0),
         )
-        .map_err(|error| format!("research pack metadata is invalid: {error}"))?;
+        .map_err(|error| {
+            CommandError::new(
+                codes::RESEARCH_PACK_INVALID,
+                format!("research pack metadata is invalid: {error}"),
+            )
+        })?;
     if format != "gp-research-pack-v2" {
-        return Err(format!("unsupported research pack format: {format}"));
+        return Err(ce(format!("unsupported research pack format: {format}")));
     }
     let document_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM pack_documents", [], |row| row.get(0))
-        .map_err(|error| format!("failed to count research pack documents: {error}"))?;
+        .map_err(|error| ce(format!("failed to count research pack documents: {error}")))?;
     if document_count < 0 || document_count as usize > MAX_PACK_DOCUMENTS {
-        return Err("research pack contains too many documents".to_string());
+        return Err(ce("research pack contains too many documents".to_string()));
     }
     let mut statement = connection
         .prepare("SELECT payload_json FROM pack_documents ORDER BY document_id")
-        .map_err(|error| format!("failed to prepare research pack documents: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to prepare research pack documents: {error}"
+            ))
+        })?;
     let payloads = statement
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| format!("failed to query research pack documents: {error}"))?
+        .map_err(|error| ce(format!("failed to query research pack documents: {error}")))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("failed to read research pack documents: {error}"))?;
+        .map_err(|error| ce(format!("failed to read research pack documents: {error}")))?;
     let mut total_chars = 0usize;
     payloads
         .into_iter()
         .map(|payload| {
             if payload.len() > MAX_PACK_DOCUMENT_CHARS * 2 {
-                return Err("research pack contains an oversized document payload".to_string());
+                return Err(ce(
+                    "research pack contains an oversized document payload".to_string()
+                ));
             }
             let value = serde_json::from_str::<Value>(&payload)
-                .map_err(|error| format!("invalid document JSON in research pack: {error}"))?;
+                .map_err(|error| ce(format!("invalid document JSON in research pack: {error}")))?;
             let content = value
                 .get("content")
                 .or_else(|| value.get("text"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             if content.chars().count() > MAX_PACK_DOCUMENT_CHARS {
-                return Err("research pack contains an oversized document".to_string());
+                return Err(ce(
+                    "research pack contains an oversized document".to_string()
+                ));
             }
             total_chars = total_chars.saturating_add(content.chars().count());
             if total_chars > MAX_PACK_BYTES as usize {
-                return Err("research pack contains too much text".to_string());
+                return Err(ce("research pack contains too much text".to_string()));
             }
             Ok(value)
         })
@@ -2607,21 +2765,25 @@ static LEGACY_MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static APP_RESEARCH_DATABASE_LOCK: OnceLock<RwLock<()>> = OnceLock::new();
 static APP_RESEARCH_DATABASE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-fn with_shared_app_database<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_shared_app_database<T, E>(operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+    E: From<CommandError>,
+{
     let lock = APP_RESEARCH_DATABASE_LOCK.get_or_init(|| RwLock::new(()));
     let _guard = lock
         .read()
-        .map_err(|_| "research database coordination lock is poisoned".to_string())?;
+        .map_err(|_| ce("research database coordination lock is poisoned".to_string()))?;
     operation()
 }
 
-fn with_exclusive_app_database<T>(
-    operation: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
+fn with_exclusive_app_database<T, E>(operation: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+    E: From<CommandError>,
+{
     let lock = APP_RESEARCH_DATABASE_LOCK.get_or_init(|| RwLock::new(()));
     let _guard = lock
         .write()
-        .map_err(|_| "research database coordination lock is poisoned".to_string())?;
+        .map_err(|_| ce("research database coordination lock is poisoned".to_string()))?;
     APP_RESEARCH_DATABASE_GENERATION.fetch_add(1, AtomicOrdering::AcqRel);
     operation()
 }
@@ -2643,19 +2805,23 @@ struct Candidate {
 fn load_vector_cache(
     connection: &Connection,
     path: &Path,
-) -> Result<Arc<Vec<CachedVector>>, String> {
+) -> Result<Arc<Vec<CachedVector>>, CommandError> {
     let (count, newest_epoch_ms) = connection
         .query_row(
             "SELECT COUNT(*), COALESCE(MAX(created_at_epoch_ms), 0) FROM embeddings",
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
-        .map_err(|error| format!("failed to inspect embedding cache version: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to inspect embedding cache version: {error}"
+            ))
+        })?;
     let cache = VECTOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
         let guard = cache
             .lock()
-            .map_err(|_| "vector cache lock is poisoned".to_string())?;
+            .map_err(|_| ce("vector cache lock is poisoned".to_string()))?;
         if let Some(entry) = guard.get(path) {
             if entry.count == count && entry.newest_epoch_ms == newest_epoch_ms {
                 return Ok(Arc::clone(&entry.rows));
@@ -2669,7 +2835,7 @@ fn load_vector_cache(
              FROM embeddings e JOIN chunks c ON c.id = e.chunk_id
              JOIN documents d ON d.id = c.document_id",
         )
-        .map_err(|error| format!("failed to prepare embedding cache: {error}"))?;
+        .map_err(|error| ce(format!("failed to prepare embedding cache: {error}")))?;
     let rows = statement
         .query_map([], |row| {
             let chunk_id: String = row.get(0)?;
@@ -2685,9 +2851,9 @@ fn load_vector_cache(
                 remote_export_allowed,
             ))
         })
-        .map_err(|error| format!("failed to query embedding cache: {error}"))?
+        .map_err(|error| ce(format!("failed to query embedding cache: {error}")))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("failed to read embedding cache: {error}"))?;
+        .map_err(|error| ce(format!("failed to read embedding cache: {error}")))?;
     let mut decoded = Vec::with_capacity(rows.len());
     for (chunk_id, stock_codes_json, blob, dimensions, remote_export_allowed) in rows {
         let vector = decode_f32_blob(&blob)?;
@@ -2704,7 +2870,7 @@ fn load_vector_cache(
     let rows = Arc::new(decoded);
     cache
         .lock()
-        .map_err(|_| "vector cache lock is poisoned".to_string())?
+        .map_err(|_| ce("vector cache lock is poisoned".to_string()))?
         .insert(
             path.to_path_buf(),
             VectorCacheEntry {
@@ -2724,7 +2890,7 @@ fn invalidate_vector_cache(path: &Path) {
     }
 }
 
-fn load_candidate(connection: &Connection, chunk_id: &str) -> Result<Candidate, String> {
+fn load_candidate(connection: &Connection, chunk_id: &str) -> Result<Candidate, CommandError> {
     connection
         .query_row(
             "SELECT c.id, c.document_id, c.title, c.content, c.page_number,
@@ -2748,15 +2914,19 @@ fn load_candidate(connection: &Connection, chunk_id: &str) -> Result<Candidate, 
                 })
             },
         )
-        .map_err(|error| format!("failed to load vector candidate {chunk_id}: {error}"))
+        .map_err(|error| {
+            ce(format!(
+                "failed to load vector candidate {chunk_id}: {error}"
+            ))
+        })
 }
 
 fn prune_retention_transaction(
     transaction: &rusqlite::Transaction<'_>,
     chunk_limit: i64,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if chunk_limit < 0 {
-        return Err("research chunk limit cannot be negative".to_string());
+        return Err(ce("research chunk limit cannot be negative".to_string()));
     }
     let old_document_ids = {
         let mut statement = transaction
@@ -2767,12 +2937,12 @@ fn prune_retention_transaction(
                    AND published_at IS NOT NULL
                    AND datetime(published_at) < datetime('now', '-365 days')",
             )
-            .map_err(|error| format!("failed to prepare retention candidates: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare retention candidates: {error}")))?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|error| format!("failed to query retention candidates: {error}"))?
+            .map_err(|error| ce(format!("failed to query retention candidates: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read retention candidates: {error}"))?;
+            .map_err(|error| ce(format!("failed to read retention candidates: {error}")))?;
         rows
     };
     let mut removed_documents = 0usize;
@@ -2783,7 +2953,7 @@ fn prune_retention_transaction(
     }
     let mut chunk_count: i64 = transaction
         .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-        .map_err(|error| format!("failed to count retained chunks: {error}"))?;
+        .map_err(|error| ce(format!("failed to count retained chunks: {error}")))?;
     if chunk_count > chunk_limit {
         let overflow_candidates = {
             let mut statement = transaction
@@ -2793,12 +2963,12 @@ fn prune_retention_transaction(
                        AND user_imported = 0 AND pinned = 0 AND cited_count = 0
                      ORDER BY COALESCE(published_at, ''), imported_at_epoch_ms, id",
                 )
-                .map_err(|error| format!("failed to prepare overflow cleanup: {error}"))?;
+                .map_err(|error| ce(format!("failed to prepare overflow cleanup: {error}")))?;
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| format!("failed to query overflow cleanup: {error}"))?
+                .map_err(|error| ce(format!("failed to query overflow cleanup: {error}")))?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("failed to read overflow cleanup: {error}"))?;
+                .map_err(|error| ce(format!("failed to read overflow cleanup: {error}")))?;
             rows
         };
         for document_id in overflow_candidates {
@@ -2812,9 +2982,9 @@ fn prune_retention_transaction(
         }
     }
     if chunk_count > chunk_limit {
-        return Err(format!(
+        return Err(ce(format!(
             "research chunk limit {chunk_limit} cannot be satisfied: {chunk_count} protected chunks remain"
-        ));
+        )));
     }
     Ok(json!({
         "removed_documents": removed_documents,
@@ -2842,14 +3012,18 @@ fn refresh_unchanged_document_metadata(
     content: &str,
     stock_codes: &[String],
     imported_at: i64,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let existing_messages = {
         let mut statement = transaction
             .prepare(
                 "SELECT id, unread, created_at_epoch_ms
                  FROM research_messages WHERE document_id = ?1",
             )
-            .map_err(|error| format!("failed to prepare existing research messages: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "failed to prepare existing research messages: {error}"
+                ))
+            })?;
         let rows = statement
             .query_map(params![document_id], |row| {
                 Ok((
@@ -2857,22 +3031,38 @@ fn refresh_unchanged_document_metadata(
                     (row.get::<_, bool>(1)?, row.get::<_, i64>(2)?),
                 ))
             })
-            .map_err(|error| format!("failed to query existing research messages: {error}"))?
+            .map_err(|error| {
+                ce(format!(
+                    "failed to query existing research messages: {error}"
+                ))
+            })?
             .collect::<Result<HashMap<_, _>, _>>()
-            .map_err(|error| format!("failed to read existing research messages: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "failed to read existing research messages: {error}"
+                ))
+            })?;
         rows
     };
     let chunk_rows = {
         let mut statement = transaction
             .prepare("SELECT id, content FROM chunks WHERE document_id = ?1 ORDER BY ordinal")
-            .map_err(|error| format!("failed to prepare unchanged research chunks: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "failed to prepare unchanged research chunks: {error}"
+                ))
+            })?;
         let rows = statement
             .query_map(params![document_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|error| format!("failed to query unchanged research chunks: {error}"))?
+            .map_err(|error| {
+                ce(format!(
+                    "failed to query unchanged research chunks: {error}"
+                ))
+            })?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("failed to read unchanged research chunks: {error}"))?;
+            .map_err(|error| ce(format!("failed to read unchanged research chunks: {error}")))?;
         rows
     };
 
@@ -2883,7 +3073,11 @@ fn refresh_unchanged_document_metadata(
              )",
             params![document_id],
         )
-        .map_err(|error| format!("failed to clear unchanged research FTS rows: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to clear unchanged research FTS rows: {error}"
+            ))
+        })?;
     transaction
         .execute(
             "UPDATE chunks SET
@@ -2905,7 +3099,11 @@ fn refresh_unchanged_document_metadata(
                 published_at
             ],
         )
-        .map_err(|error| format!("failed to refresh unchanged research chunks: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to refresh unchanged research chunks: {error}"
+            ))
+        })?;
     for (chunk_id, chunk_content) in chunk_rows {
         transaction
             .execute(
@@ -2918,7 +3116,11 @@ fn refresh_unchanged_document_metadata(
                     tokenize_for_fts(&chunk_content)
                 ],
             )
-            .map_err(|error| format!("failed to refresh unchanged research FTS row: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "failed to refresh unchanged research FTS row: {error}"
+                ))
+            })?;
     }
 
     transaction
@@ -2926,7 +3128,11 @@ fn refresh_unchanged_document_metadata(
             "DELETE FROM research_messages WHERE document_id = ?1",
             params![document_id],
         )
-        .map_err(|error| format!("failed to replace unchanged research messages: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to replace unchanged research messages: {error}"
+            ))
+        })?;
     let message_stocks = if stock_codes.is_empty() {
         vec![None]
     } else {
@@ -2958,7 +3164,11 @@ fn refresh_unchanged_document_metadata(
                     created_at
                 ],
             )
-            .map_err(|error| format!("failed to refresh unchanged research message: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "failed to refresh unchanged research message: {error}"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -2966,14 +3176,18 @@ fn refresh_unchanged_document_metadata(
 fn delete_document(
     transaction: &rusqlite::Transaction<'_>,
     document_id: &str,
-) -> Result<usize, String> {
+) -> Result<usize, CommandError> {
     let chunk_count: i64 = transaction
         .query_row(
             "SELECT COUNT(*) FROM chunks WHERE document_id = ?1",
             params![document_id],
             |row| row.get(0),
         )
-        .map_err(|error| format!("failed to count removable document chunks: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to count removable document chunks: {error}"
+            ))
+        })?;
     transaction
         .execute(
             "DELETE FROM chunks_fts WHERE chunk_id IN (
@@ -2981,10 +3195,10 @@ fn delete_document(
              )",
             params![document_id],
         )
-        .map_err(|error| format!("failed to remove retained FTS rows: {error}"))?;
+        .map_err(|error| ce(format!("failed to remove retained FTS rows: {error}")))?;
     transaction
         .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
-        .map_err(|error| format!("failed to remove retained document: {error}"))?;
+        .map_err(|error| ce(format!("failed to remove retained document: {error}")))?;
     Ok(chunk_count.max(0) as usize)
 }
 
@@ -2996,9 +3210,9 @@ fn encode_f32_blob(vector: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn normalize_embedding(vector: &[f32]) -> Result<Vec<f32>, String> {
+fn normalize_embedding(vector: &[f32]) -> Result<Vec<f32>, CommandError> {
     if vector.iter().any(|value| !value.is_finite()) {
-        return Err("vector contains a non-finite value".to_string());
+        return Err(ce("vector contains a non-finite value".to_string()));
     }
     let norm = vector
         .iter()
@@ -3006,7 +3220,7 @@ fn normalize_embedding(vector: &[f32]) -> Result<Vec<f32>, String> {
         .sum::<f64>()
         .sqrt();
     if !norm.is_finite() || norm <= f64::EPSILON {
-        return Err("vector norm is zero".to_string());
+        return Err(ce("vector norm is zero".to_string()));
     }
     Ok(vector
         .iter()
@@ -3015,9 +3229,9 @@ fn normalize_embedding(vector: &[f32]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>, String> {
+fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>, CommandError> {
     if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
-        return Err("embedding BLOB length is not aligned to f32".to_string());
+        return Err(ce("embedding BLOB length is not aligned to f32".to_string()));
     }
     Ok(bytes
         .chunks_exact(4)
@@ -3025,19 +3239,19 @@ fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>, String> {
         .collect())
 }
 
-fn initialize_schema(connection: &Connection) -> Result<(), String> {
+fn initialize_schema(connection: &Connection) -> Result<(), CommandError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| format!("failed to read research schema version: {error}"))?;
+        .map_err(|error| ce(format!("failed to read research schema version: {error}")))?;
     if version > RESEARCH_SCHEMA_VERSION {
-        return Err(format!(
+        return Err(ce(format!(
             "research database schema {version} is newer than supported version {RESEARCH_SCHEMA_VERSION}"
-        ));
+        )));
     }
     configure_connection(connection)?;
     let transaction = connection
         .unchecked_transaction()
-        .map_err(|e| format!("failed to begin research migration: {e}"))?;
+        .map_err(|e| ce(format!("failed to begin research migration: {e}")))?;
     let connection: &Connection = &transaction;
     connection
         .execute_batch(
@@ -3147,7 +3361,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
              PRAGMA user_version = 3;
              ",
         )
-        .map_err(|error| format!("failed to initialize research schema: {error}"))?;
+        .map_err(|error| ce(format!("failed to initialize research schema: {error}")))?;
     let remote_permission_column_added = ensure_column(
         connection,
         "documents",
@@ -3158,7 +3372,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
         connection.execute(
             "UPDATE documents SET remote_export_allowed = CASE WHEN user_imported = 1 THEN 0 ELSE 1 END",
             [],
-        ).map_err(|error| format!("failed to apply remote evidence migration default: {error}"))?;
+        ).map_err(|error| ce(format!("failed to apply remote evidence migration default: {error}")))?;
     }
     ensure_column(
         connection,
@@ -3180,10 +3394,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     )?;
     transaction
         .pragma_update(None, "user_version", RESEARCH_SCHEMA_VERSION)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ce(e.to_string()))?;
     transaction
         .commit()
-        .map_err(|e| format!("failed to commit research migration: {e}"))?;
+        .map_err(|e| ce(format!("failed to commit research migration: {e}")))?;
     Ok(())
 }
 
@@ -3192,13 +3406,13 @@ fn ensure_column(
     table: &str,
     column: &str,
     definition: &str,
-) -> Result<bool, String> {
+) -> Result<bool, CommandError> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|error| format!("failed to inspect {table}: {error}"))?;
+        .map_err(|error| ce(format!("failed to inspect {table}: {error}")))?;
     let exists = statement
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| format!("failed to query {table} columns: {error}"))?
+        .map_err(|error| ce(format!("failed to query {table} columns: {error}")))?
         .filter_map(Result::ok)
         .any(|name| name == column);
     drop(statement);
@@ -3207,21 +3421,21 @@ fn ensure_column(
             .execute_batch(&format!(
                 "ALTER TABLE {table} ADD COLUMN {column} {definition};"
             ))
-            .map_err(|error| format!("failed to add {table}.{column}: {error}"))?;
+            .map_err(|error| ce(format!("failed to add {table}.{column}: {error}")))?;
     }
     Ok(!exists)
 }
 
-fn configure_connection(connection: &Connection) -> Result<(), String> {
+fn configure_connection(connection: &Connection) -> Result<(), CommandError> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| ce(e.to_string()))?;
     if !(0..=RESEARCH_SCHEMA_VERSION).contains(&version) {
-        return Err(format!(
+        return Err(ce(format!(
             "research database schema {version} is unsupported; original preserved"
-        ));
+        )));
     }
-    crate::durability::configure_user_connection(connection)
+    crate::durability::configure_user_connection(connection).map_err(ce)
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
@@ -3407,7 +3621,7 @@ pub(crate) fn rrf_fuse(
     fused
 }
 
-pub(crate) fn validate_model_answer(answer: &str, citations: &[Value]) -> Result<(), String> {
+pub(crate) fn validate_model_answer(answer: &str, citations: &[Value]) -> Result<(), CommandError> {
     let allowed = citations
         .iter()
         .filter_map(|citation| {
@@ -3420,7 +3634,9 @@ pub(crate) fn validate_model_answer(answer: &str, citations: &[Value]) -> Result
         })
         .collect::<HashMap<_, _>>();
     if allowed.is_empty() {
-        return Err("model answer cannot be validated without citations".to_string());
+        return Err(ce(
+            "model answer cannot be validated without citations".to_string()
+        ));
     }
 
     let mut checked_segments = 0usize;
@@ -3434,24 +3650,26 @@ pub(crate) fn validate_model_answer(answer: &str, citations: &[Value]) -> Result
         }
         checked_segments += 1;
         if segment_citations.is_empty() {
-            return Err(format!(
+            return Err(ce(format!(
                 "model answer contains an uncited statement: {}",
                 excerpt(plain_text.trim(), 80)
-            ));
+            )));
         }
         if !segment_citations
             .iter()
             .any(|can_support_fact| *can_support_fact)
             && !is_explicitly_unverified(&plain_text)
         {
-            return Err(format!(
+            return Err(ce(format!(
                 "community citation cannot support a factual statement: {}",
                 excerpt(plain_text.trim(), 80)
-            ));
+            )));
         }
     }
     if checked_segments == 0 {
-        return Err("model answer did not contain a cited statement".to_string());
+        return Err(ce(
+            "model answer did not contain a cited statement".to_string()
+        ));
     }
     Ok(())
 }
@@ -3492,7 +3710,7 @@ fn answer_segments(answer: &str) -> Vec<&str> {
 fn inspect_answer_segment(
     segment: &str,
     allowed: &HashMap<String, bool>,
-) -> Result<(String, Vec<bool>), String> {
+) -> Result<(String, Vec<bool>), CommandError> {
     let mut plain_text = String::new();
     let mut citation_support = Vec::new();
     let mut remaining = segment;
@@ -4750,7 +4968,7 @@ mod tests {
             with_shared_app_database(|| {
                 shared_started_tx.send(()).unwrap();
                 release_shared_rx.recv().unwrap();
-                Ok(())
+                Ok::<(), CommandError>(())
             })
             .unwrap();
         });
@@ -4767,7 +4985,7 @@ mod tests {
     #[test]
     fn exclusive_database_switch_invalidates_in_flight_answers() {
         let generation = APP_RESEARCH_DATABASE_GENERATION.load(AtomicOrdering::Acquire);
-        with_exclusive_app_database(|| Ok(())).unwrap();
+        with_exclusive_app_database(|| Ok::<(), CommandError>(())).unwrap();
 
         let error = ensure_app_database_generation(generation)
             .expect_err("an answer from the previous database generation must be rejected");
@@ -5219,7 +5437,7 @@ impl ResearchEmbeddingJobGate {
 pub(crate) async fn api_research_overview(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_overview", move || {
         crate::research::with_app_store(&app, |store| {
             let mut overview = store.overview(&payload)?;
@@ -5250,7 +5468,7 @@ pub(crate) async fn api_research_overview(
 pub(crate) async fn api_research_messages(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_messages", move || {
         crate::research::with_app_store(&app, |store| store.messages(&payload))
     })
@@ -5261,7 +5479,7 @@ pub(crate) async fn api_research_messages(
 pub(crate) async fn api_research_mark_read(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_mark_read", move || {
         crate::research::with_app_store(&app, |store| store.mark_read(&payload))
     })
@@ -5272,7 +5490,7 @@ pub(crate) async fn api_research_mark_read(
 pub(crate) async fn api_research_query(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let retrieval_app = app.clone();
     let mut retrieval_payload = payload.clone();
     let remote_model_requested = payload.get("llm").is_some();
@@ -5357,7 +5575,7 @@ pub(crate) async fn api_research_query(
                     response["mode"] = Value::String("model".to_string());
                 }
                 Err(error) => {
-                    response["model_warning"] = Value::String(error);
+                    response["model_warning"] = Value::String(error.to_string());
                 }
             },
             Ok(None) => {}
@@ -5384,7 +5602,7 @@ pub(crate) async fn api_research_query(
             if let Some(thread_id) = thread_id.as_deref() {
                 store.save_answer(thread_id, &question, &saved_response)?;
             }
-            Ok(())
+            Ok::<(), CommandError>(())
         })
     })
     .await??;
@@ -5395,7 +5613,7 @@ pub(crate) async fn api_research_query(
 pub(crate) async fn api_research_refresh(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let news = crate::runtime::with_heavy_network_permit(
         "api_research_refresh",
         crate::news_rag::api_news_rag_impl(app.clone(), payload),
@@ -5413,7 +5631,7 @@ pub(crate) async fn api_research_refresh(
 }
 
 #[tauri::command]
-pub(crate) async fn api_research_threads(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_research_threads(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_threads", move || {
         crate::research::with_app_store(&app, |store| store.threads())
     })
@@ -5424,7 +5642,7 @@ pub(crate) async fn api_research_threads(app: tauri::AppHandle) -> Result<Value,
 pub(crate) async fn api_research_thread_create(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_thread_create", move || {
         crate::research::with_app_store(&app, |store| store.create_thread(&payload))
     })
@@ -5435,14 +5653,14 @@ pub(crate) async fn api_research_thread_create(
 pub(crate) async fn api_research_thread_detail(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_thread_detail", move || {
         let thread_id = payload
             .get("thread_id")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "thread_id is required".to_string())?;
+            .ok_or_else(|| CommandError::new(codes::RESEARCH_INPUT, "thread_id is required"))?;
         crate::research::with_app_store(&app, |store| store.thread(thread_id))
     })
     .await?
@@ -5452,19 +5670,19 @@ pub(crate) async fn api_research_thread_detail(
 pub(crate) async fn api_research_thread_delete(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let thread_id = payload
         .get("thread_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "thread_id is required".to_string())?
+        .ok_or_else(|| CommandError::new(codes::RESEARCH_INPUT, "thread_id is required"))?
         .to_string();
     if thread_id.len() > crate::research::MAX_RESEARCH_THREAD_ID_BYTES {
-        return Err(format!(
+        return Err(ce(format!(
             "thread_id exceeds {} bytes",
             crate::research::MAX_RESEARCH_THREAD_ID_BYTES
-        ));
+        )));
     }
     crate::runtime::run_io_bound("api_research_thread_delete", move || {
         crate::research::with_app_store(&app, |store| {
@@ -5476,7 +5694,9 @@ pub(crate) async fn api_research_thread_delete(
 }
 
 #[tauri::command]
-pub(crate) async fn api_research_index_status(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_research_index_status(
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
     let status_app = app.clone();
     let status = crate::runtime::run_io_bound("api_research_index_status", move || {
         crate::research::with_app_store(&status_app, |store| {
@@ -5488,7 +5708,7 @@ pub(crate) async fn api_research_index_status(app: tauri::AppHandle) -> Result<V
             );
             #[cfg(not(target_os = "windows"))]
             let vector_status = status["vector"].clone();
-            Ok(finalize_research_index_status(status, vector_status))
+            Ok::<Value, CommandError>(finalize_research_index_status(status, vector_status))
         })
     })
     .await??;
@@ -5525,7 +5745,9 @@ pub(crate) fn finalize_research_index_status(mut status: Value, vector_status: V
 }
 
 #[tauri::command]
-pub(crate) async fn api_research_rebuild_index(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_research_rebuild_index(
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
     crate::runtime::run_cpu_bound("api_research_rebuild_index", move || {
         crate::research::with_app_store(&app, |store| store.rebuild_fts())
     })
@@ -5535,7 +5757,7 @@ pub(crate) async fn api_research_rebuild_index(app: tauri::AppHandle) -> Result<
 #[tauri::command]
 pub(crate) async fn api_research_rebuild_embeddings(
     app: tauri::AppHandle,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     #[cfg(target_os = "windows")]
     {
         crate::runtime::run_cpu_bound("api_research_rebuild_embeddings", move || {
@@ -5546,12 +5768,14 @@ pub(crate) async fn api_research_rebuild_embeddings(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
-        Err("Android uses BM25 only and does not load the Windows embedding model".to_string())
+        Err(ce(
+            "Android uses BM25 only and does not load the Windows embedding model".to_string(),
+        ))
     }
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn rebuild_research_embeddings(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn rebuild_research_embeddings(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     crate::research::with_app_store(app, |store| {
         let model_dir = research_embedding_model_dir(app);
         let mut stored = 0usize;
@@ -5566,7 +5790,9 @@ pub(crate) fn rebuild_research_embeddings(app: &tauri::AppHandle) -> Result<Valu
                 .collect::<Vec<_>>();
             let vectors = crate::research_embeddings::embed(&model_dir, &texts)?;
             if vectors.len() != pending.len() {
-                return Err("embedding service returned an unexpected batch size".to_string());
+                return Err(ce(
+                    "embedding service returned an unexpected batch size".to_string()
+                ));
             }
             let items = pending.into_iter().zip(vectors).collect::<Vec<_>>();
             stored += items.len();
@@ -5618,7 +5844,7 @@ pub(crate) fn schedule_research_embeddings(_app: tauri::AppHandle) {}
 pub(crate) async fn api_research_pack_export(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_pack_export", move || {
         crate::research::export_app_pack(&app, &payload)
     })
@@ -5629,7 +5855,7 @@ pub(crate) async fn api_research_pack_export(
 pub(crate) async fn api_research_pack_import(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let worker_app = app.clone();
     let result = crate::runtime::run_io_bound("api_research_pack_import", move || {
         crate::research::import_app_pack(&worker_app, &payload)
@@ -5640,7 +5866,9 @@ pub(crate) async fn api_research_pack_import(
 }
 
 #[tauri::command]
-pub(crate) async fn api_research_pack_rollback(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_research_pack_rollback(
+    app: tauri::AppHandle,
+) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_pack_rollback", move || {
         crate::research::rollback_app_pack(&app)
     })
@@ -5669,7 +5897,9 @@ pub(crate) fn schedule_research_maintenance(app: tauri::AppHandle) {
         loop {
             let worker_app = app.clone();
             let result = crate::runtime::run_io_bound("background_research_retention", move || {
-                crate::research::with_app_store(&worker_app, |store| store.prune_retention())
+                crate::research::with_app_store(&worker_app, |store| {
+                    store.prune_retention().map_err(String::from)
+                })
             })
             .await
             .and_then(|result| result);

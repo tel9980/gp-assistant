@@ -723,13 +723,14 @@ async fn dispatch(app: tauri::AppHandle, kind: Kind, payload: Value) -> Result<V
         Kind::Backtest => crate::screening::api_backtest(app, payload).await,
         // Deliberately use the existing synchronous import primitive, not the command
         // that detaches embedding work. FTS is rebuilt by import_app_pack itself.
-        Kind::PackImport => {
-            crate::runtime::run_io_bound("job research pack import", move || {
-                crate::research::import_app_pack(&app, &payload)
-            })
-            .await?
-        }
-        Kind::Index => crate::research::api_research_rebuild_index(app).await,
+        Kind::PackImport => crate::runtime::run_io_bound("job research pack import", move || {
+            crate::research::import_app_pack(&app, &payload)
+        })
+        .await?
+        .map_err(String::from),
+        Kind::Index => crate::research::api_research_rebuild_index(app)
+            .await
+            .map_err(String::from),
     }
 }
 #[cfg(test)]

@@ -10,6 +10,7 @@ import type {
   ResearchThread, WatchlistItem,
 } from "../../types";
 import { buildLlmConfig, buildNewsRagRequest, normalizeNewsGroups } from "../../lib/contracts";
+import { hasErrorCode } from "../../lib/appError";
 import { formatBytes, formatDateTime, normalizeStockCode } from "../../lib/format";
 import { getJson, isMobileTauriRuntime, postJson } from "../../lib/tauri";
 import { applyMarkRead, pushCitation, useEventSelection } from "../../lib/newsInteractions";
@@ -160,11 +161,23 @@ export function NewsRagPanel(props: NewsRagPanelProps) {
       setAnswers(detail.answers || []);
       setQuestionError((current) => current?.threadId === id ? null : current);
     } catch (nextError) {
-      if (ownsRequest()) {
-        setQuestionError((current) => current && current.threadId !== id ? current : {
-          title: "会话加载失败", message: (nextError as Error).message, threadId: id,
+      if (!ownsRequest()) return;
+      if (hasErrorCode(nextError, "research.not_found")) {
+        // 会话已经不在了（另一台设备删除、或数据库被切换/回滚）。
+        // 继续把它留在侧栏只会让用户反复点到 404，直接从列表摘掉并说明原因。
+        setThreads((current) => current.filter((item) => item.id !== id));
+        threadIdRef.current = "";
+        setThreadId("");
+        setAnswers([]);
+        setQuestionError({
+          title: "会话已不存在",
+          message: "这个会话可能已被删除，或研究数据库已切换。列表已刷新，请重新选择。",
         });
+        return;
       }
+      setQuestionError((current) => current && current.threadId !== id ? current : {
+        title: "会话加载失败", message: (nextError as Error).message, threadId: id,
+      });
     }
   }, []);
 
@@ -435,7 +448,12 @@ export function NewsRagPanel(props: NewsRagPanelProps) {
     setDeletingThreadId(thread.id);
     setQuestionError(null);
     try {
-      await postJson("/api/research/threads/delete", { thread_id: thread.id });
+      try {
+        await postJson("/api/research/threads/delete", { thread_id: thread.id });
+      } catch (deleteError) {
+        // 后端说会话不存在 = 目标状态已达成，按删除成功继续走本地清理。
+        if (!hasErrorCode(deleteError, "research.not_found")) throw deleteError;
+      }
       deletedThreadIdsRef.current.add(thread.id);
       setThreads((current) => current.filter((item) => item.id !== thread.id));
       if (threadIdRef.current === thread.id) {

@@ -357,7 +357,7 @@ describe("NewsRagPanel", () => {
     let rejectQuery!: (reason: Error) => void;
     const query = new Promise((_, reject) => { rejectQuery = reject; });
     const threads = [{ id: "a", stock_code: "600000.SH", title: "A会话" }, { id: "b", stock_code: "000001.SZ", title: "B会话" }];
-    getJson.mockImplementation(async (path: string) => path.endsWith("/threads") ? { items: threads } : path.includes("/messages") ? { items: [] } : {});
+    getJson.mockImplementation(async (path: string) => path.includes("/threads") ? { items: threads } : path.includes("/messages") ? { items: [] } : {});
     postJson.mockImplementation(async (path: string, request: { thread_id?: string }) => {
       if (path.endsWith("/query")) return query;
       if (path.endsWith("/detail")) return { answers: request.thread_id === "b" ? [{ id: "b-answer", question: "B问题", answer: "新股票历史回答", citations: [] }] : [] };
@@ -616,6 +616,25 @@ describe("NewsRagPanel", () => {
     expect(renderer.root.findAllByProps({ className: "research-evidence has-selection" })).toHaveLength(0);
     expect(renderer.root.findByProps({ className: "research-question-surface" }).props.hidden).toBe(false);
     await act(async () => { renderer.unmount(); });
+  });
+
+  it("drops a research thread that the backend reports as gone", async () => {
+    // 会话在别处被删（或数据库被切换）后，后端 detail 会返回 research.not_found。
+    // 面板应当把它从列表摘掉并说明原因，而不是留一个永远点不开、只能「重试加载会话」的条目。
+    getJson.mockImplementation(async (path: string) => path.includes("/threads")
+      ? { items: [{ id: "gone", stock_code: "600000.SH", title: "已删除的研究" }] }
+      : path.includes("/messages") ? { items: [] } : {});
+    postJson.mockImplementation(async (path: string) => {
+      if (path.endsWith("/detail")) throw { code: "research.not_found", message: "research thread not found" };
+      return { answers: [] };
+    });
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<NewsRagPanel code="600000.SH" onCodeChange={() => {}} />); });
+    await openQuestions(renderer);
+    const dialog = renderer.root.findByProps({ role: "dialog", "aria-label": "研究问答" });
+    expect(textOf(dialog)).toContain("会话已不存在");
+    expect(dialog.findAll(node => node.type === "button" && node.props.className === "research-thread-main")).toHaveLength(0);
+    await act(async () => renderer.unmount());
   });
 
   it("scrolls the newest answer card into view", async () => {

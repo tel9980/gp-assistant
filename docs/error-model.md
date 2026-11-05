@@ -45,8 +45,13 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 | 模块 | 错误码 | 备注 |
 | --- | --- | --- |
 | `desktop/src-tauri/src/watchlist.rs` | `watchlist.io` / `watchlist.sqlite` / `watchlist.schema` / `watchlist.input` / `watchlist.internal`，冲突与重放沿用 `WATCHLIST_CONFLICT` / `WATCHLIST_OPERATION_REUSED` | 自选股 SQLite 全链路；冲突另带 `details.revision` |
+| `desktop/src-tauri/src/research.rs`（含 `research_recovery.rs`、`jobs.rs`、`sentiment.rs` 的接缝） | `research.io` / `research.sqlite` / `research.input` / `research.not_found` / `research.index_stale` / `research.pack_invalid` / `research.internal` | 研究库 90 处签名；`research.not_found` 已接到 `NewsRagPanel`：会话不存在时从列表摘掉并提示，而不是让用户反复点「重试加载会话」 |
 
 冲突码保留大写形式，因为前端 `watchlistStore` 早已按这两个字符串判定；改名收益为零、风险不小。
+
+`research.rs` 的迁移方式值得复用：模块内所有 `Err(format!(...))` / `.map_err(|e| format!(...))` 统一走一个私有 `fn ce(message: impl Display) -> CommandError`（落 `research.internal` 兜底，文案不变），只在**能区分处理**的地方换成精确码（`research.not_found`、`research.input`、`research.pack_invalid`、`research.sqlite`、`research.index_stale`）。这样一次迁移 90 个签名也不会把文案改乱。
+
+同时 `with_app_store` / `with_app_store_snapshot` / `with_app_store_at_generation` / `with_recovered_app_database` / `with_shared_app_database` / `with_exclusive_app_database` 都改成了泛型 `E: From<String> + From<CommandError>`：老调用方（闭包返回 `Result<_, String>`）不用改，新调用方（`CommandError`）也能直接透传。
 
 ## 迁移下一个模块的配方
 
@@ -59,5 +64,5 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 
 ## 验证
 
-- Rust：`cd native/gp-core && cargo test --lib`（不受影响）；`desktop/src-tauri` 只能由 CI 的 `desktop shell (cargo check)` job 编译（本机缺 webkit2gtk/gtk），本地可先 `cargo fmt --all --check` 保证语法。
+- Rust：`cd native/gp-core && cargo test --lib`（不受影响）；`desktop/src-tauri` 本地也能编译了 —— 装上 `libwebkit2gtk-4.1-dev libgtk-3-dev` 后 `cargo check --all-targets --features gepa-lab` 约 2m41s（增量秒级），`cargo test --lib` 约 50s。注意 `stock_research_runtime::tests` 里有 2 条 `hash_mismatch` 用例在干净树上也红（fixture 的 SHA256 与当前导出逻辑不一致），与本模型无关。
 - 前端：`npm run test:fast`，`src/lib/appError.test.ts` 覆盖四种错误形态。

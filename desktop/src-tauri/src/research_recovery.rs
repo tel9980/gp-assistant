@@ -272,7 +272,7 @@ fn quiesce(path: &Path) -> Result<(), String> {
         .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| format!("failed to sync research database: {e}"))?;
-    remove_sqlite_sidecars(path)
+    remove_sqlite_sidecars(path).map_err(String::from)
 }
 
 pub(super) fn recover(root: &Path) -> Result<(), String> {
@@ -491,9 +491,11 @@ mod tests {
         store
     }
     fn staged_document(path: &Path) -> Result<(), String> {
-        ResearchStore::open(path)?
+        ResearchStore::open(path)
+            .map_err(String::from)?
             .ingest_documents(&[document("replacement research evidence")])
             .map(|_| ())
+            .map_err(String::from)
     }
     fn content(root: &TempRoot) -> String {
         read_only(&root.main())

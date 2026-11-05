@@ -88,7 +88,9 @@ fn connection(app: &AppHandle) -> Result<Connection, String> {
     )
 }
 fn generation(app: &AppHandle) -> Result<String, String> {
-    research::with_app_store(app, |store| store.sentiment_generation())
+    research::with_app_store(app, |store| {
+        store.sentiment_generation().map_err(String::from)
+    })
 }
 
 async fn freeze(app: AppHandle, payload: Value) -> Result<Value, String> {

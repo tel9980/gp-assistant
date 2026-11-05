@@ -23,6 +23,13 @@ pub mod codes {
     pub const WATCHLIST_SCHEMA: &str = "watchlist.schema";
     pub const WATCHLIST_INPUT: &str = "watchlist.input";
     pub const WATCHLIST_INTERNAL: &str = "watchlist.internal";
+    pub const RESEARCH_IO: &str = "research.io";
+    pub const RESEARCH_SQLITE: &str = "research.sqlite";
+    pub const RESEARCH_INPUT: &str = "research.input";
+    pub const RESEARCH_NOT_FOUND: &str = "research.not_found";
+    pub const RESEARCH_INDEX_STALE: &str = "research.index_stale";
+    pub const RESEARCH_PACK_INVALID: &str = "research.pack_invalid";
+    pub const RESEARCH_INTERNAL: &str = "research.internal";
     pub const WATCHLIST_CONFLICT: &str = "WATCHLIST_CONFLICT";
     pub const WATCHLIST_OPERATION_REUSED: &str = "WATCHLIST_OPERATION_REUSED";
 }
@@ -135,6 +142,15 @@ impl From<rusqlite::Error> for CommandError {
 impl From<serde_json::Error> for CommandError {
     fn from(error: serde_json::Error) -> Self {
         Self::new(codes::WATCHLIST_INPUT, error.to_string())
+    }
+}
+
+#[cfg(test)]
+impl CommandError {
+    /// 测试断言便利方法：迁移期大量旧断言是 `err.contains("...")`，
+    /// 保持它们可读，同时不把字符串匹配暴露成生产 API。
+    pub(crate) fn contains(&self, needle: &str) -> bool {
+        self.message.contains(needle)
     }
 }
 
