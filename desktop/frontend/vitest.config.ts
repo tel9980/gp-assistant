@@ -38,14 +38,22 @@ export default mergeConfig(
           }
         : {}),
       testTimeout: 20_000,
-      // 覆盖率只统计 src/lib（IPC 包装、存储、契约、解析这类风险最高的一层）。
-      // 阈值取 2026-11-05 基线（statements 76.4 / branches 65.7 / functions 74.7 / lines 80.1）
-      // 留 2~3 个点余量，防住回退但不因重构误报。
+      // 覆盖率统计范围 = src/lib（IPC 包装/存储/契约/解析）+ src/hooks + src/components。
+      // 2026-11-05 实测基线（三者合计）：statements 75.7 / branches 67.1 / functions 72.9 / lines 79.7；
+      // 其中 src/lib 单层：76.2 / 65.7 / 74.9 / 79.9。
+      // 全局阈值留 2 个点余量；src/lib 另设一条更严的 glob 阈值（vitest 支持按 glob 设 threshold，
+      // 已验证会被真正执行：故意调高会报 “does not meet ... threshold”）。
       coverage: {
         provider: "v8",
-        include: ["src/lib/**/*.{ts,tsx}"],
+        include: ["src/lib/**/*.{ts,tsx}", "src/hooks/**/*.{ts,tsx}", "src/components/**/*.{ts,tsx}"],
         reporter: ["text-summary", "lcov"],
-        thresholds: { statements: 74, branches: 62, functions: 72, lines: 78 },
+        thresholds: {
+          statements: 74,
+          branches: 65,
+          functions: 71,
+          lines: 78,
+          "src/lib/**/*.{ts,tsx}": { statements: 74, branches: 62, functions: 72, lines: 78 },
+        },
       },
     },
   }),

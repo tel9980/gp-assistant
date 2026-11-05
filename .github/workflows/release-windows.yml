@@ -1,4 +1,4 @@
-name: Release Windows installer
+name: Release Windows installer + portable
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build:
-    name: Build NSIS installer (windows-latest)
+    name: Build NSIS installer + portable (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     env:
@@ -91,6 +91,49 @@ jobs:
           path: ${{ steps.rename.outputs.path }}
           if-no-files-found: error
 
+      # 免安装版：主程序 + 同目录 models/（RAG 本地向量模型）。
+      # Tauri 对未安装的 exe 会把 resource_dir() 解析成 exe 所在目录，
+      # 所以 model 必须和 exe 放同一个文件夹（src-tauri/src/research.rs: research_embedding_model_dir）。
+      - name: Package portable (免安装)
+        id: portable
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          $root = "dist/portable/guxuanyou_${version}_windows_x64"
+          Remove-Item -Recurse -Force "dist" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          $exe = "desktop/src-tauri/target/release/stock-optimizer-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "portable binary not found: $exe" }
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $root "guxuanyou.exe") -Force
+
+          if (Test-Path "models") {
+            Copy-Item -Recurse -Force "models" (Join-Path $root "models")
+            Write-Host "bundled models: $((Get-ChildItem -Recurse models -File | Measure-Object Length -Sum).Sum / 1MB) MB"
+          } else {
+            Write-Warning "models/ 不存在：免安装包将缺少本地向量模型（研究检索会降级）"
+          }
+          Copy-Item -LiteralPath "README.md" -Destination $root -ErrorAction SilentlyContinue
+
+          $zip = "dist/guxuanyou_${version}_windows_x64_portable.zip"
+          Compress-Archive -Path (Join-Path $root "*") -DestinationPath $zip -Force
+          $single = "dist/guxuanyou_${version}_windows_x64_portable.exe"
+          # 单文件版（仅主程序，解压后需自行放 models/ 才能用本地向量检索）
+          Copy-Item -LiteralPath $exe -Destination $single -Force
+
+          foreach ($f in @($zip, $single)) { Write-Host "$f $([math]::Round((Get-Item $f).Length/1MB,1)) MB" }
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "single=$single" >> $env:GITHUB_OUTPUT
+
+      - name: Upload portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: |
+            ${{ steps.portable.outputs.zip }}
+            ${{ steps.portable.outputs.single }}
+          if-no-files-found: error
+
       - name: Resolve tag
         id: tag
         shell: pwsh
@@ -108,6 +151,16 @@ jobs:
           $exe = "${{ steps.rename.outputs.path }}"
           gh release view $tag 2>$null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "股选优 $tag" --notes "CI 构建（commit ${{ github.sha }}）。安装包未做 Authenticode 签名。" --prerelease
+            gh release create $tag --title "股选优 $tag" --notes "CI 构建（commit ${{ github.sha }}）。未做 Authenticode 签名，首次运行会有 SmartScreen 提示。
+
+          - guxuanyou_*_windows_x64_setup.exe：安装版（NSIS）
+          - guxuanyou_*_windows_x64_portable.zip：免安装版，解压即用（含本地向量模型 models/）
+          - guxuanyou_*_windows_x64_portable.exe：免安装单文件版，仅主程序（需要本地向量检索时把 models/ 放到同目录）
+
+          免安装版依赖系统自带的 WebView2 运行时（Win10 1803+ / Win11 默认就有）。" --prerelease
           }
+          Copy-Item -LiteralPath "${{ steps.portable.outputs.zip }}" -Destination "." -Force
+          Copy-Item -LiteralPath "${{ steps.portable.outputs.single }}" -Destination "." -Force
           gh release upload $tag $exe --clobber
+          gh release upload $tag (Split-Path "${{ steps.portable.outputs.zip }}" -Leaf) --clobber
+          gh release upload $tag (Split-Path "${{ steps.portable.outputs.single }}" -Leaf) --clobber

@@ -291,3 +291,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-android.ps1 -S
 ## 风险声明
 
 本项目中的筛选分数、量化指标、新闻情绪、回测结果和 Agent 输出均仅供研究参考，不是买卖建议、目标价、仓位建议或收益承诺。历史表现不代表未来结果，用户应独立核验数据并自行承担决策风险。
+
+## 发布产物
+
+`Release Windows installer + portable` 工作流一次产出三个文件：NSIS 安装包、免安装 zip
+（含 `models/` 本地向量模型，解压即用）、免安装单文件 exe。详见 `docs/ci-release.md`。
+
