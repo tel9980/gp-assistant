@@ -3012,7 +3012,7 @@ async fn http_get_text_with_headers_timeout(
 ) -> Result<String, CommandError> {
     let user_agent = "Mozilla/5.0 GuXuanYou/0.3 news-rag";
     match powershell_http_get_bytes_with_headers(url, timeout_secs, user_agent, referer) {
-        Ok(bytes) => return Ok(decode_http_text(&bytes)),
+        Ok(bytes) => Ok(decode_http_text(&bytes)),
         Err(powershell_error) => {
             let mut request = client.get(url).header("User-Agent", user_agent);
             if !referer.trim().is_empty() {

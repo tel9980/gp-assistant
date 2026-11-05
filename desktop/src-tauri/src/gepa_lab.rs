@@ -1033,7 +1033,7 @@ pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Val
     )))]
     {
         let _ = (app, payload);
-        return Err(ce("GEPA 仅在启用功能的 Windows 或 Android 构建中可用"));
+        Err(ce("GEPA 仅在启用功能的 Windows 或 Android 构建中可用"))
     }
     #[cfg(all(
         feature = "gepa-lab",
@@ -1115,7 +1115,7 @@ pub(crate) fn api_agent_gepa_report(app: AppHandle, payload: Value) -> Result<Va
         .unwrap_or_default()
         .trim();
     validate_run_id(id)?;
-    serde_json::to_value(load_report(&app, id)?).map_err(|e| ce(e))
+    serde_json::to_value(load_report(&app, id)?).map_err(ce)
 }
 #[tauri::command]
 pub(crate) fn api_agent_gepa_apply(app: AppHandle, payload: Value) -> Result<Value, CommandError> {

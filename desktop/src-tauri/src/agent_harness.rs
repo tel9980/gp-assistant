@@ -1,4 +1,7 @@
 use crate::error::{codes, CommandError};
+// 这两个只在 `#[cfg(test)]` 的用例里用到：import 必须同样带 cfg，否则 lib 构建会报 unused，
+// 而 `cargo clippy --fix` 会把它整个删掉、让测试构建编译不过。
+#[cfg(test)]
 use crate::{market::build_http_client_with_proxy, runtime};
 #[cfg(test)]
 use futures::StreamExt;
@@ -1149,9 +1152,7 @@ fn redact_url_literals(value: &str) -> String {
             .map(|length| start + length)
             .unwrap_or(value.len());
         let token = &value[start..end];
-        let trailing_len = token
-            .trim_end_matches(|character| matches!(character, '.' | ',' | ';' | ')' | ']' | '}'))
-            .len();
+        let trailing_len = token.trim_end_matches(['.', ',', ';', ')', ']', '}']).len();
         let url_token = &token[..trailing_len];
         if url_token
             .parse::<reqwest::Url>()
@@ -1177,7 +1178,7 @@ fn persisted_url_is_sensitive(url: &reqwest::Url) -> bool {
         || host.ends_with(".local")
         || host.ends_with(".lan")
         || url.query_pairs().any(|(key, _)| {
-            let key = key.to_ascii_lowercase().replace('-', "_").replace('.', "_");
+            let key = key.to_ascii_lowercase().replace(['-', '.'], "_");
             [
                 "api_key",
                 "apikey",

@@ -346,7 +346,7 @@ fn observation_metadata_from_dates<'a>(
             .map(str::to_string),
         &coverage,
     );
-    metadata["optional_data"] = json!({"financials":data.get("financials").and_then(|v| v.get(&code)).is_some(), "capital_evidence":data.get("capital_evidence").and_then(|v| v.get(&code)).is_some(), "order_book":"not_refreshed_in_cache_only"});
+    metadata["optional_data"] = json!({"financials":data.get("financials").and_then(|v| v.get(code)).is_some(), "capital_evidence":data.get("capital_evidence").and_then(|v| v.get(code)).is_some(), "order_book":"not_refreshed_in_cache_only"});
     Ok(metadata)
 }
 
@@ -991,7 +991,7 @@ pub(crate) fn merge_observe_fundamental_supplement(
     {
         let entry = crate::market::financial_entry_mut(data, code);
         for (field, value) in &fields {
-            let valid_number = crate::market::json_f64(Some(&value)).is_some();
+            let valid_number = crate::market::json_f64(Some(value)).is_some();
             let valid_period = (field == "period" || field.ends_with("_period"))
                 && value.as_str().is_some_and(|value| !value.trim().is_empty());
             let valid_text = matches!(field.as_str(), "source" | "report_notice_date")
@@ -1926,7 +1926,7 @@ pub(crate) async fn fetch_eastmoney_main_fund_flow(
     .map_err(|error| error.to_string())?;
     let text = crate::market::http_get_text_with_headers_first(
         client,
-        &url.to_string(),
+        url.as_ref(),
         OBSERVE_CAPITAL_REQUEST_TIMEOUT_SECS,
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "https://data.eastmoney.com/zjlx/detail.html",
@@ -2230,10 +2230,10 @@ pub(crate) async fn fetch_eastmoney_institution_lhb(
     let digits = normalized
         .get(..6)
         .ok_or_else(|| format!("无效龙虎榜股票代码：{code}"))?;
-    let start = crate::market::normalize_history_date(start_date)
-        .unwrap_or_else(|| fallback_lhb_start_date());
+    let start =
+        crate::market::normalize_history_date(start_date).unwrap_or_else(fallback_lhb_start_date);
     let end = crate::market::normalize_history_date(end_date)
-        .unwrap_or_else(|| crate::market::fallback_today_date());
+        .unwrap_or_else(crate::market::fallback_today_date);
     let filter =
         format!("(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')(SECURITY_CODE=\"{digits}\")");
     let url = reqwest::Url::parse_with_params(
@@ -2253,7 +2253,7 @@ pub(crate) async fn fetch_eastmoney_institution_lhb(
     .map_err(|error| error.to_string())?;
     let text = crate::market::http_get_text_with_headers_first(
         client,
-        &url.to_string(),
+        url.as_ref(),
         OBSERVE_CAPITAL_REQUEST_TIMEOUT_SECS,
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "https://data.eastmoney.com/stock/jgmmtj.html",
@@ -2454,7 +2454,7 @@ pub(crate) async fn fetch_eastmoney_lhb_seat_side(
     .map_err(|error| error.to_string())?;
     let text = crate::market::http_get_text_with_headers_first(
         client,
-        &url.to_string(),
+        url.as_ref(),
         OBSERVE_LHB_SEAT_REQUEST_TIMEOUT_SECS,
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "https://data.eastmoney.com/stock/tradedetail.html",

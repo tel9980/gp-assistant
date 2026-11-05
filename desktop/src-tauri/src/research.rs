@@ -2051,7 +2051,7 @@ fn import_research_documents(
         staging.connection()?.execute(
             "INSERT OR REPLACE INTO research_metadata(key,value) VALUES('legacy_v1_import_complete','true')", []
         ).map_err(|error| ce(error.to_string()))?;
-        staging.rebuild_fts().map(|_| ()).map_err(|error| ce(error))
+        staging.rebuild_fts().map(|_| ()).map_err(ce)
     })?;
     Ok(json!({
         "schema_version": RESEARCH_PACK_SCHEMA_VERSION,
@@ -2185,7 +2185,7 @@ fn rollback_research_documents(research_dir: &Path) -> Result<Value, CommandErro
         let staging = ResearchStore::open(staging_path)?;
         // Discard every old user row before copying CURRENT authority, including deletions.
         preserve_local_research_state(&research_dir.join("research.sqlite"), &staging)?;
-        staging.rebuild_fts().map(|_| ()).map_err(|error| ce(error))
+        staging.rebuild_fts().map(|_| ()).map_err(ce)
     })?;
     Ok(
         json!({"rolled_back":true, "replaced_database":recovery::rollback_source(research_dir)?.display().to_string()}),
@@ -3234,7 +3234,9 @@ fn decode_f32_blob(bytes: &[u8]) -> Result<Vec<f32>, CommandError> {
         return Err(ce("embedding BLOB length is not aligned to f32".to_string()));
     }
     Ok(bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
@@ -5440,7 +5442,7 @@ pub(crate) async fn api_research_overview(
 ) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_overview", move || {
         crate::research::with_app_store(&app, |store| {
-            let mut overview = store.overview(&payload)?;
+            let overview = store.overview(&payload)?;
             #[cfg(target_os = "windows")]
             {
                 let index = store.index_status()?;

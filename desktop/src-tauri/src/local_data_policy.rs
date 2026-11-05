@@ -2,11 +2,6 @@
 use crate::error::{codes, CommandError};
 use serde_json::{json, Value};
 
-/// 本模块的错误统一从这里出（迁移期兜底码 LOCAL_DATA_POLICY_INTERNAL）。
-fn ce(message: impl std::fmt::Display) -> CommandError {
-    CommandError::new(codes::LOCAL_DATA_POLICY_INTERNAL, message.to_string())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DataPolicy {
     CacheOnly,

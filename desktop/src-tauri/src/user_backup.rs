@@ -1060,11 +1060,11 @@ fn install_absent(source: &Path, destination: &Path) -> Result<bool, CommandErro
     {
         // A sync failure occurs after installation: callers must report the partial
         // durability result, NOT return a misleading no-mutation error.
-        return Ok(
+        Ok(
             fs::File::open(destination.parent().ok_or("missing parent")?)
                 .and_then(|f| f.sync_all())
                 .is_ok(),
-        );
+        )
     }
     #[cfg(not(unix))]
     Ok(fs::OpenOptions::new()

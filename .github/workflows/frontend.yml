@@ -154,3 +154,11 @@ jobs:
       - name: cargo fmt --check
         working-directory: desktop/src-tauri
         run: cargo fmt --check
+
+      # CommandError 曾经膨胀到 136 字节，让 764 个函数触发 result_large_err；
+      # 现已改成 Box<ErrorBody>（8 字节）。这条门禁只锁这一个 lint，防止有人
+      # 再把大字段塞回错误类型。其余历史警告（dead_code / too_many_arguments 等）
+      # 暂不阻断，数量记在 docs/error-model.md。
+      - name: cargo clippy (result_large_err gate)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets --features gepa-lab --message-format short -- -D clippy::result_large_err

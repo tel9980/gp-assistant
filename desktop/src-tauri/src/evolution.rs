@@ -282,7 +282,7 @@ impl EvolutionStore {
             .get("evidence_refs")
             .cloned()
             .unwrap_or_else(|| json!([]));
-        if !evidence_refs.is_array() || evidence_refs.as_array().map_or(true, Vec::is_empty) {
+        if !evidence_refs.is_array() || evidence_refs.as_array().is_none_or(Vec::is_empty) {
             return Err("confirmed evolution rules require evidence_refs".into());
         }
         let rule_id = payload
@@ -339,7 +339,7 @@ impl EvolutionStore {
             .get("evidence_refs")
             .cloned()
             .unwrap_or_else(|| json!([]));
-        if !evidence_refs.is_array() || evidence_refs.as_array().map_or(true, Vec::is_empty) {
+        if !evidence_refs.is_array() || evidence_refs.as_array().is_none_or(Vec::is_empty) {
             return Err("edited rules require evidence_refs".into());
         }
         let transaction = self.connection.unchecked_transaction().map_err(sql_error)?;
@@ -429,7 +429,7 @@ impl EvolutionStore {
     }
 
     fn save_review(&self, id: &str, payload: &Value) -> Result<(), CommandError> {
-        let text = serde_json::to_string(payload).map_err(|error| ce(error))?;
+        let text = serde_json::to_string(payload).map_err(ce)?;
         if text.len() > MAX_REVIEW_CHARS * 4 {
             return Err(ce("review payload is too large"));
         }
@@ -596,7 +596,7 @@ impl EvolutionStore {
             "SELECT payload_json FROM sentiment_strategy_versions WHERE strategy_id=?1 AND version=?2",
             params![id,version], |row| row.get(0),
         ).map_err(sql_error)?;
-        let payload: Value = serde_json::from_str(&payload_text).map_err(|error| ce(error))?;
+        let payload: Value = serde_json::from_str(&payload_text).map_err(ce)?;
         let next: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(version),0)+1 FROM sentiment_strategy_versions WHERE strategy_id=?1",
             [id], |row| row.get(0),
@@ -713,7 +713,7 @@ pub(crate) async fn api_evolution_review_enhance(
         codes::EVOLUTION_INPUT,
         "review is required",
     ))?;
-    let review_text = serde_json::to_string(&review).map_err(|error| ce(error))?;
+    let review_text = serde_json::to_string(&review).map_err(ce)?;
     if review_text.len() > MAX_REVIEW_CHARS {
         return Err(ce("review payload is too large"));
     }

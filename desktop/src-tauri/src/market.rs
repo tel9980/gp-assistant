@@ -3,8 +3,6 @@ use base64::{engine::general_purpose, Engine as _};
 use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-#[cfg(not(mobile))]
-use std::process::Command;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -1354,14 +1352,11 @@ pub(crate) async fn core_mobile_market_data_refresh_tencent_inner(
         "Tencent quote refresh finished: fetched {} of {} candidates, preserved {} local rows",
         refresh.fetched, refresh.requested, refresh.preserved
     )];
-    match refresh.stop_reason.as_deref() {
-        Some("failed_batches") => {
-            notes.push(format!(
-                "Tencent quote refresh stopped early after {} failed batches",
-                refresh.failed_batches
-            ));
-        }
-        _ => {}
+    if let Some("failed_batches") = refresh.stop_reason.as_deref() {
+        notes.push(format!(
+            "Tencent quote refresh stopped early after {} failed batches",
+            refresh.failed_batches
+        ));
     }
     if !refresh.error_samples.is_empty() {
         notes.push(format!(
@@ -1489,7 +1484,7 @@ pub(crate) fn core_mobile_market_data_ingest_tencent_quotes(
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .or_else(|| quote_bytes.as_ref().map(Vec::len))
-        .unwrap_or_else(|| quote_text.len());
+        .unwrap_or(quote_text.len());
     let webview_elapsed_ms = payload
         .get("webview_elapsed_ms")
         .and_then(Value::as_u64)
@@ -5689,7 +5684,7 @@ pub(crate) fn write_mobile_market_data_record(
         &summary,
     );
     remember_refresh_seed(app, &payload);
-    return Ok(market_cache_record(
+    Ok(market_cache_record(
         &path,
         bytes.len() as u64,
         file_modified_millis(&path),
@@ -5697,7 +5692,7 @@ pub(crate) fn write_mobile_market_data_record(
         &payload,
         include_data,
         "external market store written",
-    ));
+    ))
 }
 
 fn write_mobile_market_data_legacy(

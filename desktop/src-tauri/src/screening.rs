@@ -756,7 +756,7 @@ pub(crate) async fn api_trend_analyze(
     let coverage = local_history_coverage(
         data.as_ref(),
         &HashMap::new(),
-        &[request.code.clone()],
+        std::slice::from_ref(&request.code),
         &request.start_date,
         &request.end_date,
         1,
@@ -1221,7 +1221,7 @@ pub(crate) fn adaptive_history_progress_percent(completed: usize, total: usize) 
         return 72;
     }
     let completed = completed.min(total);
-    24 + ((completed * 48 + total - 1) / total).min(48)
+    24 + (completed * 48).div_ceil(total).min(48)
 }
 
 pub(crate) async fn collect_adaptive_history_results<F, Fut, P>(
@@ -2191,7 +2191,7 @@ pub(crate) fn backtest_history_requirements(
     request: &gp_core::BacktestRequest,
 ) -> Result<Vec<String>, CommandError> {
     let source = gp_core::StaticDataSource::with_overrides(data, stocks, None);
-    gp_core::backtest_required_history_symbols(&source, request).map_err(|error| ce(error))
+    gp_core::backtest_required_history_symbols(&source, request).map_err(ce)
 }
 
 pub(crate) fn backtest_history_rows_are_usable(rows: &[Value]) -> bool {

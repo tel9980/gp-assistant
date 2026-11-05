@@ -286,7 +286,7 @@ fn quiesce(path: &Path) -> Result<(), CommandError> {
         .open(path)
         .and_then(|file| file.sync_all())
         .map_err(|e| ce(format!("failed to sync research database: {e}")))?;
-    remove_sqlite_sidecars(path).map_err(|error| ce(error))
+    remove_sqlite_sidecars(path).map_err(ce)
 }
 
 pub(super) fn recover(root: &Path) -> Result<(), CommandError> {

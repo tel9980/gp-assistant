@@ -55,7 +55,6 @@ pub mod codes {
     pub const AGENT_LEDGER_INTERNAL: &str = "agent_ledger.internal";
     pub const EXTERNAL_STORE_INTERNAL: &str = "external_store.internal";
     /// 舆情/情绪域（sentiment 家族）。
-    pub const SENTIMENT_INPUT: &str = "sentiment.input";
     pub const SENTIMENT_INTERNAL: &str = "sentiment.internal";
     pub const GEPA_LAB_INTERNAL: &str = "gepa_lab.internal";
     pub const PROMPT_UPGRADE_INTERNAL: &str = "prompt_upgrade.internal";
@@ -76,7 +75,6 @@ pub mod codes {
     pub const JOBS_INPUT: &str = "jobs.input";
     pub const JOBS_INTERNAL: &str = "jobs.internal";
     /// 选股/回测/筛选（screening）。
-    pub const SCREENING_IO: &str = "screening.io";
     pub const SCREENING_INPUT: &str = "screening.input";
     pub const SCREENING_INTERNAL: &str = "screening.internal";
     /// 观察页（observe）。
@@ -93,11 +91,8 @@ pub mod codes {
     pub const CORE_INPUT: &str = "core.input";
     pub const CORE_INTERNAL: &str = "core.internal";
     /// 度量单位与数值规整（metric_units）。
-    pub const METRIC_UNITS_INPUT: &str = "metric_units.input";
     pub const METRIC_UNITS_INTERNAL: &str = "metric_units.internal";
     /// 本地数据策略（local_data_policy）。
-    pub const LOCAL_DATA_POLICY_INPUT: &str = "local_data_policy.input";
-    pub const LOCAL_DATA_POLICY_INTERNAL: &str = "local_data_policy.internal";
     /// 前端按这三个码做提示分支，**值必须保持大写原样**。
     pub const LOCAL_DATA_MISSING: &str = "LOCAL_DATA_MISSING";
     pub const LOCAL_DATA_POLICY_INVALID: &str = "INVALID_DATA_POLICY";
@@ -108,49 +103,62 @@ pub mod codes {
     pub const WATCHLIST_OPERATION_REUSED: &str = "WATCHLIST_OPERATION_REUSED";
 }
 
+/// 错误的实际载荷。放在 Box 里，让 `CommandError` 本身体积只有 8 字节。
+///
+/// 迁移期 `Result<T, CommandError>` 遍布全部命令与内部函数，若错误值本身
+/// 就占 136 字节，clippy 的 `result_large_err`（阈 128 字节）会对每个函数报一次
+/// （当时 764 条）。装箱后体积降到指针大小，警告全部消失，而 API、
+/// `Display` 文案与序列化契约（`{ code, message, hint, details }`）一字未变。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandError {
+struct ErrorBody {
     code: &'static str,
     message: String,
     hint: Option<String>,
     details: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandError {
+    body: Box<ErrorBody>,
+}
+
 impl CommandError {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            code,
-            message: message.into(),
-            hint: None,
-            details: None,
+            body: Box::new(ErrorBody {
+                code,
+                message: message.into(),
+                hint: None,
+                details: None,
+            }),
         }
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
-        self.hint = Some(hint.into());
+        self.body.hint = Some(hint.into());
         self
     }
 
     /// 结构化附加信息（如冲突时的当前 revision），前端可据此做精确恢复。
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
+        self.body.details = Some(details);
         self
     }
 
     pub fn details(&self) -> Option<&serde_json::Value> {
-        self.details.as_ref()
+        self.body.details.as_ref()
     }
 
     pub fn code(&self) -> &'static str {
-        self.code
+        self.body.code
     }
 
     pub fn message(&self) -> &str {
-        &self.message
+        &self.body.message
     }
 
     pub fn hint(&self) -> Option<&str> {
-        self.hint.as_deref()
+        self.body.hint.as_deref()
     }
 }
 
@@ -162,14 +170,14 @@ impl CommandError {
 #[cfg(test)]
 impl PartialEq<&str> for CommandError {
     fn eq(&self, other: &&str) -> bool {
-        self.message == *other
+        self.body.message == *other
     }
 }
 
 #[cfg(test)]
 impl PartialEq<CommandError> for &str {
     fn eq(&self, other: &CommandError) -> bool {
-        other.message == *self
+        other.body.message == *self
     }
 }
 
@@ -177,13 +185,13 @@ impl std::ops::Deref for CommandError {
     type Target = str;
 
     fn deref(&self) -> &str {
-        &self.message
+        &self.body.message
     }
 }
 
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        f.write_str(&self.body.message)
     }
 }
 
@@ -193,13 +201,13 @@ impl Serialize for CommandError {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("CommandError", 4)?;
-        state.serialize_field("code", self.code)?;
-        state.serialize_field("message", &self.message)?;
-        match &self.hint {
+        state.serialize_field("code", self.body.code)?;
+        state.serialize_field("message", &self.body.message)?;
+        match &self.body.hint {
             Some(hint) => state.serialize_field("hint", hint)?,
             None => state.serialize_field("hint", &Option::<String>::None)?,
         }
-        match &self.details {
+        match &self.body.details {
             Some(details) => state.serialize_field("details", details)?,
             None => state.serialize_field("details", &Option::<serde_json::Value>::None)?,
         }
@@ -218,7 +226,7 @@ impl From<CommandError> for String {
     /// 迁移期桥接：未改造的调用方仍按 `Result<_, String>` 工作，
     /// `?` / `map_err` 到这里取回原始文案，行为与迁移前一致。
     fn from(error: CommandError) -> Self {
-        error.message
+        error.body.message
     }
 }
 

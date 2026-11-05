@@ -202,7 +202,7 @@ fn import_legacy_records(
         );
     }
 
-    let expected = canonical_record_set(&records)?;
+    let expected = canonical_record_set(records)?;
     if expected.len() != records.len() {
         return record_failure(
             store,
@@ -214,7 +214,7 @@ fn import_legacy_records(
             "legacy cache contains duplicate canonical records",
         );
     }
-    let imported_count = match store.upsert_batch(&records) {
+    let imported_count = match store.upsert_batch(records) {
         Ok(count) => count,
         Err(error) => {
             return record_failure(

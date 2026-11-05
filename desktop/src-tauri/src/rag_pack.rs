@@ -247,7 +247,7 @@ pub(crate) fn upstream_rag_build(
     let code = string_field(&payload, "code")
         .and_then(|value| normalize_stock_code(&value))
         .ok_or_else(|| ce("code is required."))?;
-    let data_until = string_field(&payload, "data_until").unwrap_or_else(|| current_stamp());
+    let data_until = string_field(&payload, "data_until").unwrap_or_else(current_stamp);
     let stock = find_stock(&market_data, &code)
         .unwrap_or_else(|| json!({"code": code, "name": code, "industry": ""}));
     let stock_name = stock

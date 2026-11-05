@@ -103,3 +103,30 @@ error[E0277/E0271]: expected `{async block@gepa_lab.rs:694:13}` to be a future t
 
 - Rust：`cd native/gp-core && cargo test --lib`（不受影响）；`desktop/src-tauri` 本地也能编译了 —— 装上 `libwebkit2gtk-4.1-dev libgtk-3-dev` 后 `cargo check --all-targets --features gepa-lab` 约 2m41s（增量秒级），`cargo test --lib` 约 50s。注意 `stock_research_runtime::tests` 里有 2 条 `hash_mismatch` 用例在干净树上也红（fixture 的 SHA256 与当前导出逻辑不一致），与本模型无关。
 - 前端：`npm run test:fast`，`src/lib/appError.test.ts` 覆盖四种错误形态。
+
+## 错误值的体积（`result_large_err`）
+
+`CommandError` 装的是「码 + 文案 + 提示 + JSON 细节」，字段平铺时是 **136 字节**；迁移铺开后
+`desktop/src-tauri` 里 764 个函数/闭包都吃到了 clippy 的 `result_large_err`（阈值 128 字节）。
+
+现在载荷收进 `Box<ErrorBody>`，`CommandError` 只剩 **8 字节**（一个指针）：
+
+```rust
+pub struct CommandError { body: Box<ErrorBody> }
+```
+
+API（`new` / `with_hint` / `with_details` / `code()` / `message()` / `hint()` / `details()`）、
+`Display` 文案、`Deref<Target = str>` 与序列化契约（`{ code, message, hint, details }`）都一字未变，
+所以迁移过的调用方和前端零改动。这一条已加进 CI 门禁：
+
+```
+cargo clippy --all-targets --features gepa-lab -- -D clippy::result_large_err
+```
+
+**唯一豁免**：`desktop/src-tauri/src/rig_runtime.rs` 文件级 `#![allow(clippy::result_large_err)]` ——
+那条链的错误类型来自第三方 `rig` crate（`RigAgentError`，128 字节），且刻意没迁到 `CommandError`
+（见上面「迁移边界」）。
+
+剩余历史警告（不计入门禁，2026-11-05 统计）：`desktop/src-tauri` 全量 clippy 约 81 条，主要是
+`dead_code`、`too_many_arguments`、`type_complexity`、`field_reassign_with_default` 等既有风格问题；
+`native/gp-core` 已清零并用 `-D warnings` 阻断。

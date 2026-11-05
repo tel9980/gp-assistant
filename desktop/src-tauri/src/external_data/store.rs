@@ -1278,8 +1278,7 @@ fn validate_cutoff(cutoff: Option<&str>) -> Result<(), CommandError> {
             .chars()
             .filter(|character| character.is_ascii_digit())
             .count();
-        if digits < 8
-            || digits > 14
+        if !(8..=14).contains(&digits)
             || !cutoff.bytes().all(|byte| {
                 byte.is_ascii_digit() || matches!(byte, b'-' | b'T' | b':' | b'Z' | b'.')
             })

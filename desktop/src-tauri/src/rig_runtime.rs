@@ -1,5 +1,11 @@
 //! Rig-backed Agent runtime contracts.
 
+//
+// 这条链路刻意不迁到 `CommandError`（泛型闭包 + 第三方 trait 签名纠缠，见
+// docs/error-model.md「迁移边界」）：错误类型是 rig 的 `RigAgentError`（128 字节）
+// 或本链内部的 `String`，命令边界由 `From<String>` 兜底。因此按文件豁免该 lint。
+#![allow(clippy::result_large_err)]
+
 use bytes::Bytes;
 use futures::StreamExt;
 use rig_agent::agent::hook::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
@@ -1987,7 +1993,7 @@ where
             "payload": {"items": items}
         }));
     }
-    sink(status_event(&run_id, "complete", "完成", 100));
+    sink(status_event(run_id, "complete", "完成", 100));
     sink(serde_json::json!({
         "run_id": run_id,
         "type": "final",
