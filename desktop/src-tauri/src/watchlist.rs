@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,7 +14,7 @@ pub(crate) const WATCHLIST_DB_FILE: &str = "watchlist.sqlite";
 const WATCHLIST_SCHEMA_VERSION: i64 = 2;
 
 #[tauri::command]
-pub(crate) async fn api_watchlist_snapshot(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_watchlist_snapshot(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_snapshot", move || {
         watchlist_snapshot(&mut open_watchlist_db(&app)?)
     })
@@ -24,7 +25,7 @@ pub(crate) async fn api_watchlist_snapshot(app: tauri::AppHandle) -> Result<Valu
 pub(crate) async fn api_watchlist_mutate(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_mutate", move || {
         mutate_watchlist(&mut open_watchlist_db(&app)?, &payload)
     })
@@ -34,7 +35,7 @@ pub(crate) async fn api_watchlist_mutate(
 // Legacy commands retain their array responses, but all writes take the same
 // IMMEDIATE transaction and increment the same revision as the delta protocol.
 #[tauri::command]
-pub(crate) async fn api_watchlist_list(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_watchlist_list(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_list", move || watchlist_list_sync(&app))
         .await?
 }
@@ -43,7 +44,7 @@ pub(crate) async fn api_watchlist_list(app: tauri::AppHandle) -> Result<Value, S
 pub(crate) async fn api_watchlist_replace(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_replace", move || {
         let items = watchlist_items_from_payload(&payload)?;
         watchlist_replace_sync(&app, items)
@@ -55,7 +56,7 @@ pub(crate) async fn api_watchlist_replace(
 pub(crate) async fn api_watchlist_add(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_add", move || {
         legacy_mutation(
             &mut open_watchlist_db(&app)?,
@@ -72,7 +73,7 @@ pub(crate) async fn api_watchlist_add(
 pub(crate) async fn api_watchlist_remove(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_remove", move || {
         let code = payload
             .get("code")
@@ -90,7 +91,7 @@ pub(crate) async fn api_watchlist_remove(
 }
 
 #[tauri::command]
-pub(crate) async fn api_watchlist_clear(app: tauri::AppHandle) -> Result<Value, String> {
+pub(crate) async fn api_watchlist_clear(app: tauri::AppHandle) -> Result<Value, CommandError> {
     crate::runtime::run_user_state_bound("api_watchlist_clear", move || {
         legacy_mutation(&mut open_watchlist_db(&app)?, WatchlistMutation::Clear)
     })
@@ -128,7 +129,7 @@ struct MutationRequest {
     mutation: WatchlistMutation,
 }
 
-pub(crate) fn watchlist_db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn watchlist_db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
@@ -140,11 +141,11 @@ pub(crate) fn watchlist_db_path(app: &tauri::AppHandle) -> Result<PathBuf, Strin
     Ok(root)
 }
 
-pub(crate) fn open_watchlist_db(app: &tauri::AppHandle) -> Result<Connection, String> {
+pub(crate) fn open_watchlist_db(app: &tauri::AppHandle) -> Result<Connection, CommandError> {
     open_watchlist_db_path(&watchlist_db_path(app)?)
 }
 
-fn open_watchlist_db_path(path: &Path) -> Result<Connection, String> {
+fn open_watchlist_db_path(path: &Path) -> Result<Connection, CommandError> {
     // Connection::open silently accepts an existing zero-byte database. Check
     // existence and its header first; damage must not become a fresh install.
     let fresh_file = match fs::symlink_metadata(path) {
@@ -154,9 +155,12 @@ fn open_watchlist_db_path(path: &Path) -> Result<Connection, String> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(error) => {
-            return Err(format!(
-                "inspect watchlist sqlite failed: {}: {error}",
-                path.display()
+            return Err(CommandError::new(
+                codes::WATCHLIST_IO,
+                format!(
+                    "inspect watchlist sqlite failed: {}: {error}",
+                    path.display()
+                ),
             ))
         }
     };
@@ -172,23 +176,27 @@ fn open_watchlist_db_path(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-fn sql_error(error: rusqlite::Error) -> String {
-    format!("watchlist sqlite: {error}")
+fn sql_error(error: rusqlite::Error) -> CommandError {
+    CommandError::new(
+        codes::WATCHLIST_SQLITE,
+        format!("watchlist sqlite: {error}"),
+    )
 }
 
-fn schema_version(conn: &Connection) -> Result<i64, String> {
+fn schema_version(conn: &Connection) -> Result<i64, CommandError> {
     let version = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(sql_error)?;
     if !(0..=WATCHLIST_SCHEMA_VERSION).contains(&version) {
-        return Err(format!(
-            "unsupported watchlist schema version {version}; maximum is {WATCHLIST_SCHEMA_VERSION}"
-        ));
+        return Err(CommandError::new(
+            codes::WATCHLIST_SCHEMA,
+            format!("unsupported watchlist schema version {version}; maximum is {WATCHLIST_SCHEMA_VERSION}"),
+        ).with_hint("备份 watchlist.db 后重建，或升级到匹配版本"));
     }
     Ok(version)
 }
 
-fn initialize_watchlist_db(conn: &mut Connection, fresh_file: bool) -> Result<(), String> {
+fn initialize_watchlist_db(conn: &mut Connection, fresh_file: bool) -> Result<(), CommandError> {
     // Reject a newer database before changing even its journal policy.
     schema_version(conn)?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -243,7 +251,7 @@ fn initialize_watchlist_db(conn: &mut Connection, fresh_file: bool) -> Result<()
     tx.commit().map_err(sql_error)
 }
 
-fn snapshot_in_transaction(conn: &Connection) -> Result<Value, String> {
+fn snapshot_in_transaction(conn: &Connection) -> Result<Value, CommandError> {
     let (revision, migration_complete): (i64, bool) = conn
         .query_row(
             "SELECT revision, migration_complete FROM watchlist_state WHERE singleton=1",
@@ -256,14 +264,14 @@ fn snapshot_in_transaction(conn: &Connection) -> Result<Value, String> {
     )
 }
 
-fn watchlist_snapshot(conn: &mut Connection) -> Result<Value, String> {
+fn watchlist_snapshot(conn: &mut Connection) -> Result<Value, CommandError> {
     let tx = conn.transaction().map_err(sql_error)?;
     let result = snapshot_in_transaction(&tx)?;
     tx.commit().map_err(sql_error)?;
     Ok(result)
 }
 
-fn upsert_records(conn: &Connection, items: Vec<WatchlistRecord>) -> Result<(), String> {
+fn upsert_records(conn: &Connection, items: Vec<WatchlistRecord>) -> Result<(), CommandError> {
     let mut stmt = conn.prepare(
         "INSERT INTO watchlist (code,name,industry,added_at,source,screen_criteria_summary,updated_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7)
@@ -286,7 +294,7 @@ fn upsert_records(conn: &Connection, items: Vec<WatchlistRecord>) -> Result<(), 
     Ok(())
 }
 
-fn apply_mutation(conn: &Connection, mutation: WatchlistMutation) -> Result<(), String> {
+fn apply_mutation(conn: &Connection, mutation: WatchlistMutation) -> Result<(), CommandError> {
     let mut consumes_pristine = true;
     match mutation {
         WatchlistMutation::Delta { upserts, removes } => {
@@ -334,7 +342,7 @@ fn apply_mutation(conn: &Connection, mutation: WatchlistMutation) -> Result<(), 
     Ok(())
 }
 
-fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, String> {
+fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, CommandError> {
     let request: MutationRequest = serde_json::from_value(payload.clone())
         .map_err(|e| format!("invalid watchlist mutation: {e}"))?;
     if request.operation_id.trim().is_empty()
@@ -360,7 +368,10 @@ fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, Str
         .map_err(sql_error)?;
     if let Some((original, response)) = duplicate {
         if original != encoded {
-            return Err(json!({"code":"WATCHLIST_OPERATION_REUSED", "message":"operationId already committed with a different payload"}).to_string());
+            return Err(CommandError::new(
+                codes::WATCHLIST_OPERATION_REUSED,
+                "operationId already committed with a different payload",
+            ));
         }
         // Check duplicate BEFORE revision. A lost acknowledgement must be
         // retryable even after other writers have advanced the database.
@@ -374,7 +385,11 @@ fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, Str
         )
         .map_err(sql_error)?;
     if revision != request.expected_revision {
-        return Err(json!({"code":"WATCHLIST_CONFLICT", "revision":revision, "message":"watchlist changed; reload and explicitly retry the delta"}).to_string());
+        return Err(CommandError::new(
+            codes::WATCHLIST_CONFLICT,
+            "watchlist changed; reload and explicitly retry the delta",
+        )
+        .with_details(json!({ "revision": revision })));
     }
     apply_mutation(&tx, request.mutation)?;
     let response = snapshot_in_transaction(&tx)?;
@@ -387,7 +402,10 @@ fn mutate_watchlist(conn: &mut Connection, payload: &Value) -> Result<Value, Str
     Ok(response)
 }
 
-fn legacy_mutation(conn: &mut Connection, mutation: WatchlistMutation) -> Result<Value, String> {
+fn legacy_mutation(
+    conn: &mut Connection,
+    mutation: WatchlistMutation,
+) -> Result<Value, CommandError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(sql_error)?;
@@ -397,14 +415,14 @@ fn legacy_mutation(conn: &mut Connection, mutation: WatchlistMutation) -> Result
     Ok(items)
 }
 
-pub(crate) fn watchlist_list_sync(app: &tauri::AppHandle) -> Result<Value, String> {
+pub(crate) fn watchlist_list_sync(app: &tauri::AppHandle) -> Result<Value, CommandError> {
     watchlist_rows(&open_watchlist_db(app)?)
 }
 
 pub(crate) fn watchlist_replace_sync(
     app: &tauri::AppHandle,
     items: Vec<WatchlistRecord>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let mut conn = open_watchlist_db(app)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -415,7 +433,7 @@ pub(crate) fn watchlist_replace_sync(
     tx.commit().map_err(sql_error)?;
     Ok(result)
 }
-pub(crate) fn watchlist_rows(conn: &Connection) -> Result<Value, String> {
+pub(crate) fn watchlist_rows(conn: &Connection) -> Result<Value, CommandError> {
     let mut stmt = conn
         .prepare(
             "SELECT code, name, industry, added_at, source, screen_criteria_summary
@@ -444,7 +462,7 @@ pub(crate) fn watchlist_rows(conn: &Connection) -> Result<Value, String> {
 
 pub(crate) fn watchlist_items_from_payload(
     payload: &Value,
-) -> Result<Vec<WatchlistRecord>, String> {
+) -> Result<Vec<WatchlistRecord>, CommandError> {
     let items = payload
         .get("items")
         .and_then(Value::as_array)
@@ -452,7 +470,7 @@ pub(crate) fn watchlist_items_from_payload(
     items.iter().map(watchlist_item_from_value).collect()
 }
 
-pub(crate) fn watchlist_item_from_value(value: &Value) -> Result<WatchlistRecord, String> {
+pub(crate) fn watchlist_item_from_value(value: &Value) -> Result<WatchlistRecord, CommandError> {
     let code = value
         .get("code")
         .and_then(Value::as_str)
@@ -518,12 +536,18 @@ mod reliability_tests {
         assert_eq!(second_result["items"].as_array().unwrap().len(), 2);
         assert_eq!(mutate_watchlist(&mut conn, &first).unwrap(), first_result);
         assert_eq!(watchlist_snapshot(&mut conn).unwrap()["revision"], 2);
-        assert!(mutate_watchlist(&mut conn, &add("three", 0, "000003.SZ"))
-            .unwrap_err()
-            .contains("WATCHLIST_CONFLICT"));
-        assert!(mutate_watchlist(&mut conn, &add("one", 0, "000003.SZ"))
-            .unwrap_err()
-            .contains("WATCHLIST_OPERATION_REUSED"));
+        assert!(
+            mutate_watchlist(&mut conn, &add("three", 0, "000003.SZ"))
+                .unwrap_err()
+                .code(),
+            "WATCHLIST_CONFLICT"
+        );
+        assert!(
+            mutate_watchlist(&mut conn, &add("one", 0, "000003.SZ"))
+                .unwrap_err()
+                .code(),
+            "WATCHLIST_OPERATION_REUSED"
+        );
         assert_eq!(watchlist_rows(&conn).unwrap().as_array().unwrap().len(), 2);
     }
 
@@ -607,9 +631,9 @@ mod reliability_tests {
     fn future_schema_is_rejected_without_rewriting_it() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA user_version = 99;").unwrap();
-        assert!(initialize_watchlist_db(&mut conn, false)
-            .unwrap_err()
-            .contains("unsupported watchlist schema"));
+        let error = initialize_watchlist_db(&mut conn, false).unwrap_err();
+        assert_eq!(error.code(), codes::WATCHLIST_SCHEMA);
+        assert!(error.to_string().contains("unsupported watchlist schema"));
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -648,9 +672,12 @@ mod reliability_tests {
         let state = watchlist_snapshot(&mut conn).unwrap();
         assert_eq!(state["revision"], 1);
         assert_eq!(state["migrationComplete"], true);
-        assert!(mutate_watchlist(&mut conn, &add("stale", 0, "000001.SZ"))
-            .unwrap_err()
-            .contains("WATCHLIST_CONFLICT"));
+        assert!(
+            mutate_watchlist(&mut conn, &add("stale", 0, "000001.SZ"))
+                .unwrap_err()
+                .code(),
+            "WATCHLIST_CONFLICT"
+        );
     }
 
     struct TestDatabase(PathBuf);
@@ -728,11 +755,14 @@ mod reliability_tests {
             .collect();
         let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-        assert!(results
-            .iter()
-            .find_map(|r| r.as_ref().err())
-            .unwrap()
-            .contains("WATCHLIST_CONFLICT"));
+        assert!(
+            results
+                .iter()
+                .find_map(|r| r.as_ref().err())
+                .unwrap()
+                .code(),
+            "WATCHLIST_CONFLICT"
+        );
         let state = watchlist_snapshot(&mut file.open()).unwrap();
         assert_eq!(state["revision"], 1);
         assert_eq!(state["items"].as_array().unwrap().len(), 1);

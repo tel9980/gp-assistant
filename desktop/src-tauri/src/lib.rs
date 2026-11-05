@@ -1,6 +1,7 @@
 mod credentials;
 mod diagnostics;
 mod durability;
+mod error;
 mod external_data;
 mod jobs;
 mod perf_diagnostics;

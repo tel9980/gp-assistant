@@ -1,5 +1,6 @@
 import type { WatchlistItem } from "../types";
 import { normalizeStockCode } from "./format";
+import { errorMessage, hasErrorCode } from "./appError";
 import { getTauriInvoke, isTauriRuntime } from "./tauri";
 
 const WATCHLIST_KEY = "stock-optimizer-watchlist";
@@ -154,10 +155,9 @@ function renderOptimistic(base: WatchlistItem[]): void {
 }
 
 function conflict(error: unknown): boolean {
-  try {
-    const parsed = typeof error === "string" ? JSON.parse(error) : error;
-    return (parsed as { code?: string })?.code === "WATCHLIST_CONFLICT";
-  } catch { return false; }
+  // 后端既可能抛旧式 JSON 字符串，也可能抛 CommandError 序列化后的对象，
+  // 两种形态都交给 hasErrorCode 归一化判定。
+  return hasErrorCode(error, "WATCHLIST_CONFLICT");
 }
 
 async function drain(): Promise<void> {
@@ -218,7 +218,7 @@ async function drain(): Promise<void> {
       needsRebase = true;
       hydrated = false;
     }
-    publish("error", error instanceof Error ? error.message : String(error));
+    publish("error", errorMessage(error));
   }
 }
 
@@ -262,13 +262,13 @@ export function createPersistentWatchlistSetter(setter: WatchlistSetter): Watchl
     items = next;
     if (!isTauriRuntime() && !pending.length) {
       try { localStorage.setItem(WATCHLIST_KEY, JSON.stringify(items)); publish("saved"); }
-      catch (error) { publish("error", String(error)); }
+      catch (error) { publish("error", errorMessage(error)); }
       setter(items);
       return;
     }
     pending.push(operation({ kind: "delta", upserts, removes }));
     try { saveOutbox(); }
-    catch (error) { publish("error", String(error)); setter(items); return; }
+    catch (error) { publish("error", errorMessage(error)); setter(items); return; }
     if (status.status === "error") {
       publish("error", status.error);
       setter(items);

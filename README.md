@@ -231,6 +231,8 @@ npm run test:fast   # 两段式，约 18s（推荐日常用）
 [docs/frontend-testing.md](docs/frontend-testing.md)。
 
 CI 构建与发布（Windows 安装包）见 [docs/ci-release.md](docs/ci-release.md)。
+命令错误的分级错误码（`CommandError`）与前端归一化见
+[docs/error-model.md](docs/error-model.md)。
 
 运行 Rust 测试：
 
