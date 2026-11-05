@@ -36,6 +36,15 @@ export default mergeConfig(
           }
         : {}),
       testTimeout: 20_000,
+      // 覆盖率只统计 src/lib（IPC 包装、存储、契约、解析这类风险最高的一层）。
+      // 阈值取 2026-11-05 基线（statements 76.4 / branches 65.7 / functions 74.7 / lines 80.1）
+      // 留 2~3 个点余量，防住回退但不因重构误报。
+      coverage: {
+        provider: "v8",
+        include: ["src/lib/**/*.{ts,tsx}"],
+        reporter: ["text-summary", "lcov"],
+        thresholds: { statements: 74, branches: 62, functions: 72, lines: 78 },
+      },
     },
   }),
 );

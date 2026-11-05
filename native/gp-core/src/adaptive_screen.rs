@@ -1281,10 +1281,7 @@ fn history_for<'a>(
         .or_else(|| histories.get(&code.to_ascii_uppercase()))
 }
 
-fn select_primary<'a>(
-    candidates: &'a [AdaptiveCandidate],
-    limit: usize,
-) -> Vec<&'a AdaptiveCandidate> {
+fn select_primary(candidates: &[AdaptiveCandidate], limit: usize) -> Vec<&AdaptiveCandidate> {
     let mut selected = Vec::new();
     let mut industries = HashMap::<String, usize>::new();
     for candidate in candidates {

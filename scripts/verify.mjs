@@ -31,6 +31,7 @@ const steps = [
   { group: "contracts", name: "未样式化 class", cmd: "node", args: ["scripts/check-unstyled-classes.mjs"], cwd: ROOT },
   { group: "contracts", name: "信息密度", cmd: "node", args: ["scripts/check-ui-density.mjs"], cwd: ROOT },
   { group: "contracts", name: "主题对齐", cmd: "node", args: ["scripts/check-theme-parity.mjs"], cwd: ROOT },
+  { group: "contracts", name: "IPC 契约（命令名/参数）", cmd: "node", args: ["scripts/check-ipc-contract.mjs"], cwd: ROOT },
 
   // —— 契约自测（node:test） ——
   {

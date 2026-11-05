@@ -39,6 +39,16 @@ jobs:
         working-directory: desktop/frontend
         run: npx vitest run --config vitest.config.ts
 
+      # 只覆盖 src/lib（IPC 包装/存储/解析），阈值见 vitest.config.ts
+      - name: Coverage (src/lib)
+        working-directory: desktop/frontend
+        run: npm run test:coverage -- --coverage.reporter=text-summary
+
+      # Rust 命令名/形参与前端 invoke 调用点是否对得上
+      - name: IPC contract
+        run: node ../../scripts/check-ipc-contract.mjs
+        working-directory: desktop/frontend
+
       - name: Bundle budget
         working-directory: desktop/frontend
         run: npm run test:bundle
@@ -84,8 +94,8 @@ jobs:
         working-directory: native/gp-core
         run: cargo fmt --check
 
-      # 当前基线还有 27 条 clippy 警告（其中 13 条可 --fix 自动修）。
-      # 先跑成「可见但不阻断」，清零后再加 `-- -D warnings`。
-      - name: cargo clippy（基线 27 条警告，暂不阻断）
+      # gp-core 已清零（2026-11-05），从这里开始 -D warnings 防回潮。
+      # desktop/src-tauri 那侧还有历史警告，暂不在本 job 阻断。
+      - name: cargo clippy -D warnings
         working-directory: native/gp-core
-        run: cargo clippy --all-targets --message-format short
+        run: cargo clippy --all-targets --message-format short -- -D warnings

@@ -30,7 +30,7 @@ fn adaptive_stock(index: usize) -> StockItem {
         dividend_yield: Some(0.02),
         deducted_net_profit_billion: Some(2.0),
         deducted_net_profit_growth_rate: Some(8.0),
-        change_pct: Some(if index % 2 == 0 { 0.01 } else { -0.01 }),
+        change_pct: Some(if index.is_multiple_of(2) { 0.01 } else { -0.01 }),
         amount: Some(600_000_000.0),
         turnover_rate: Some(0.025),
         volume_ratio: Some(1.1),
@@ -120,13 +120,13 @@ fn adaptive_exploration_fills_the_requested_ten_slots_with_fallback_candidates()
         .all(|item| !primary.contains(item.stock.code.as_str())));
 }
 
-fn adaptive_fixture(
-    benchmark_slope: f64,
-) -> (
+type AdaptiveFixture = (
     Vec<StockItem>,
     HashMap<String, Vec<HistoryBar>>,
     HashMap<String, Vec<HistoryBar>>,
-) {
+);
+
+fn adaptive_fixture(benchmark_slope: f64) -> AdaptiveFixture {
     let stocks = (0..18).map(adaptive_stock).collect::<Vec<_>>();
     let histories = stocks
         .iter()
@@ -219,7 +219,7 @@ fn ordinary_small_pools_apply_neutral_and_shrunken_industry_ranks() {
             score_profile: profile.into(),
             ..Default::default()
         };
-        let singleton = screen_stocks(&[low.clone()], &criteria);
+        let singleton = screen_stocks(std::slice::from_ref(&low), &criteria);
         assert_eq!(
             singleton.items[0].factor_scores.get("industry_quality_pct"),
             Some(&0.5)
@@ -1163,7 +1163,8 @@ fn roe_filter_uses_documented_ratio_thresholds() {
         custom_test_stock("000002.SZ", "low-roe", "bank", 100.0, 10.0, 0.08),
     ];
 
-    for minimum in [0.10] {
+    {
+        let minimum = 0.10;
         let result = screen_stocks(
             &universe,
             &ScreenCriteria {

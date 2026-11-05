@@ -1856,7 +1856,7 @@ pub fn screen_with_source(
     criteria: &ScreenCriteria,
 ) -> CoreResult<ScreenResult> {
     let universe = source.stocks()?;
-    Ok(screen_stocks(&universe, criteria))
+    Ok(screen_stocks(universe, criteria))
 }
 
 pub fn sector_screen_with_data(
@@ -1865,7 +1865,7 @@ pub fn sector_screen_with_data(
 ) -> CoreResult<SectorScreenResult> {
     let source = StaticDataSource::new(data);
     let universe = source.stocks()?;
-    Ok(sector_screen_stocks(&universe, request))
+    Ok(sector_screen_stocks(universe, request))
 }
 
 pub fn sector_screen_stocks(
@@ -1970,11 +1970,7 @@ pub fn sector_screen_stocks(
             "已隐藏 {omitted_small_sector_count} 个样本不足的行业分组（共 {omitted_small_stock_count} 只股票）；分组门槛为 {min_sector_candidates} 只。"
         ));
     }
-    if board_mode {
-        notes.push("基准为候选池买入持有等权曲线，用于衡量调仓与成本后的超额收益。".to_string());
-    } else {
-        notes.push("基准为候选池买入持有等权曲线，用于衡量调仓与成本后的超额收益。".to_string());
-    }
+    notes.push("基准为候选池买入持有等权曲线，用于衡量调仓与成本后的超额收益。".to_string());
     SectorScreenResult {
         total: screened.len(),
         returned,
@@ -2001,7 +1997,7 @@ pub fn graph_screen_with_source(
 ) -> CoreResult<GraphScreenResult> {
     let universe = source.stocks()?;
     let relations = source.relations()?;
-    Ok(graph_screen_stocks(&universe, &relations, request))
+    Ok(graph_screen_stocks(universe, relations, request))
 }
 
 pub fn backtest_with_mock(request: &BacktestRequest) -> CoreResult<BacktestResult> {
@@ -2645,6 +2641,7 @@ fn simulate_walk_forward_portfolio(
 
 const MIN_HISTORY_BARS_FOR_ADAPTIVE_BACKTEST: usize = 60;
 
+#[allow(clippy::too_many_arguments)] // 内部模拟函数，参数即上下文，拆结构体反而更难读
 fn simulate_walk_forward_portfolio_with_snapshots(
     universe: &[StockItem],
     request: &BacktestRequest,
@@ -2692,7 +2689,9 @@ fn simulate_walk_forward_portfolio_with_snapshots(
             && equity_before_rebalance > 0.0
             && previous_trade_date.is_some()
         {
-            let signal_date = previous_trade_date.expect("checked above");
+            let Some(signal_date) = previous_trade_date else {
+                unreachable!("checked above");
+            };
             let signal_prices = histories
                 .iter()
                 .map(|history| price_on_date(history, signal_date))
@@ -2905,6 +2904,7 @@ fn walk_forward_active_indices(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 参数即上下文，拆结构体反而更难读
 fn adaptive_walk_forward_active_indices(
     universe: &[StockItem],
     request: &BacktestRequest,
@@ -3701,14 +3701,14 @@ fn build_observation_financial_indicators(
         &mut items,
         "\u{5e02}\u{76c8}\u{7387}(TTM)",
         stock.pe,
-        |value| format_number(value),
+        format_number,
         "neutral",
     );
     push_indicator(
         &mut items,
         "\u{5e02}\u{51c0}\u{7387}",
         stock.pb,
-        |value| format_number(value),
+        format_number,
         "neutral",
     );
     let snapshot_roe = financial.and_then(|snapshot| snapshot.roe);
@@ -4014,6 +4014,7 @@ fn push_indicator(
     push_indicator_with_meta(items, label, raw_value, formatter, tone, None, None, None);
 }
 
+#[allow(clippy::too_many_arguments)] // 参数即上下文，拆结构体反而更难读
 fn push_indicator_with_meta(
     items: &mut Vec<FinancialIndicatorItem>,
     label: &str,
@@ -4809,7 +4810,7 @@ pub fn trend_screen_with_source(
     request: &TrendScreenRequest,
 ) -> CoreResult<TrendScreenResult> {
     let universe = source.stocks()?;
-    let candidate_pool = screen_candidate_pool(&universe, &request.criteria, request.limit);
+    let candidate_pool = screen_candidate_pool(universe, &request.criteria, request.limit);
     let mut items = Vec::new();
     let mut skipped = 0_usize;
     let mut outdated = Vec::new();
@@ -4874,7 +4875,7 @@ pub fn trend_screen_with_source(
     items.sort_by(|left, right| right.final_score.total_cmp(&left.final_score));
     items.truncate(request.limit.clamp(1, 100));
     let mut notes = trend_notes();
-    notes.extend(deducted_profit_rule_notes(&universe, &request.criteria));
+    notes.extend(deducted_profit_rule_notes(universe, &request.criteria));
     if !outdated.is_empty() {
         notes.push(format!(
             "{} 只候选的日线落后行情，未使用旧指标参与当前趋势排名。",
@@ -5191,8 +5192,8 @@ fn agent_beginner_stock_sections(response: &AgentResponse) -> Option<Vec<AgentAn
     let code = json_string(stock, "code").unwrap_or_default();
     let price = json_f64(stock, "price").map(format_price_text);
     let change = json_f64(stock, "change_pct").map(format_signed_percent_text);
-    let pe = json_f64(stock, "pe").map(|value| format_number(value));
-    let pb = json_f64(stock, "pb").map(|value| format_number(value));
+    let pe = json_f64(stock, "pe").map(format_number);
+    let pb = json_f64(stock, "pb").map(format_number);
     let roe = json_f64(stock, "roe").map(format_percent);
     let market_cap =
         json_f64(stock, "market_cap_billion").map(|value| format!("{}亿", format_number(value)));
@@ -7493,7 +7494,7 @@ fn fundamental_score(stock: &StockItem) -> f64 {
     };
     let dividend = stock.dividend_yield.and_then(ratio_percentage_points);
     let dividend_bonus = dividend
-        .map(|value| value.max(0.0).min(6.0) / 6.0 * 0.12)
+        .map(|value| value.clamp(0.0, 6.0) / 6.0 * 0.12)
         .unwrap_or(0.0);
     let mut quality_bonus = 0.0;
     if stock
@@ -7687,7 +7688,7 @@ fn market_heat_score(stock: &StockItem) -> f64 {
     let turnover = stock
         .turnover_rate
         .and_then(ratio_percentage_points)
-        .map(|value| (value.max(0.0).min(8.0) / 8.0).clamp(0.0, 1.0))
+        .map(|value| (value.clamp(0.0, 8.0) / 8.0).clamp(0.0, 1.0))
         .unwrap_or(0.45);
     let amount = stock
         .amount
@@ -8478,7 +8479,7 @@ fn prepare_bars(history: &[HistoryBar], stock: &StockItem) -> CoreResult<Vec<Pre
             capital: bar.capital.unwrap_or(fallback_capital).max(1.0),
         });
     }
-    bars.sort_by(|left, right| left.date.cmp(&right.date));
+    bars.sort_by_key(|left| left.date);
     Ok(bars)
 }
 
@@ -10075,7 +10076,7 @@ fn history_points_from_bars(history: &[HistoryBar]) -> CoreResult<Vec<HistoryPoi
             close: bar.close,
         });
     }
-    points.sort_by(|left, right| left.date.cmp(&right.date));
+    points.sort_by_key(|left| left.date);
     Ok(points)
 }
 
@@ -10185,12 +10186,13 @@ fn backtest_metrics(
 }
 
 fn heuristic_criteria(message: &str) -> ScreenCriteria {
-    let mut criteria = ScreenCriteria::default();
-    criteria.max_pe = extract_number_after(message, &["PE", "pe", "市盈率"]);
-    criteria.max_pb = extract_number_after(message, &["PB", "pb", "市净率"]);
-    criteria.min_roe = extract_percent_after(message, &["ROE", "roe", "净资产收益率"]);
-    criteria.industry = extract_industry(message);
-    criteria
+    ScreenCriteria {
+        max_pe: extract_number_after(message, &["PE", "pe", "市盈率"]),
+        max_pb: extract_number_after(message, &["PB", "pb", "市净率"]),
+        min_roe: extract_percent_after(message, &["ROE", "roe", "净资产收益率"]),
+        industry: extract_industry(message),
+        ..ScreenCriteria::default()
+    }
 }
 
 fn extract_number_after(message: &str, labels: &[&str]) -> Option<f64> {
