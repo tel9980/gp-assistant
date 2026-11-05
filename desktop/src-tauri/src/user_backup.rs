@@ -1,6 +1,7 @@
 //! Manual encrypted user backups, distinct from research sync packs.
 //! Only recognized native schemas support explicit no-replace restore or tombstone-aware merge.
 //! Generic staged SQLite datasets must never be installed as live databases.
+use crate::error::{codes, CommandError};
 use aes_gcm::{
     aead::{Aead, Payload},
     Aes256Gcm, KeyInit, Nonce,
@@ -19,6 +20,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, Zeroizing};
+
+/// 用户备份模块的错误统一从这里出：保留原文，落到备份域错误码。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::BACKUP_INTERNAL, message.to_string())
+}
 
 const MAGIC: &[u8; 8] = b"GPUBAK\0\0";
 const VERSION: u16 = 1;
@@ -59,7 +65,7 @@ const STORE_SPECS: [StoreSpec; 5] = [
         relative_path: "client-state.sqlite",
     },
 ];
-fn spec(id: &str) -> Result<&'static StoreSpec, String> {
+fn spec(id: &str) -> Result<&'static StoreSpec, CommandError> {
     STORE_SPECS
         .iter()
         .find(|s| s.id == id)
@@ -130,9 +136,12 @@ pub struct BackupPreview {
     missing_stores: Vec<String>,
 }
 
-fn check_password(password: &str) -> Result<(), String> {
+fn check_password(password: &str) -> Result<(), CommandError> {
     if password.len() < 12 || password.len() > 1024 || password.trim().is_empty() {
-        return Err("backup passphrase must contain 12 to 1024 UTF-8 bytes".into());
+        return Err(CommandError::new(
+            codes::BACKUP_CRYPTO,
+            "backup passphrase must contain 12 to 1024 UTF-8 bytes",
+        ));
     }
     Ok(())
 }
@@ -145,7 +154,7 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, String
         .map_err(|_| "backup key derivation failed")?;
     Ok(key)
 }
-fn encrypt_archive(archive: &Archive, password: &str) -> Result<String, String> {
+fn encrypt_archive(archive: &Archive, password: &str) -> Result<String, CommandError> {
     check_password(password)?;
     let plaintext =
         Zeroizing::new(serde_json::to_vec(archive).map_err(|_| "backup encoding failed")?);
@@ -177,7 +186,7 @@ fn encrypt_archive(archive: &Archive, password: &str) -> Result<String, String> 
     header.extend_from_slice(&ciphertext);
     Ok(STANDARD.encode(header))
 }
-fn decrypt_archive(blob: &str, password: &str) -> Result<Archive, String> {
+fn decrypt_archive(blob: &str, password: &str) -> Result<Archive, CommandError> {
     if blob.len() > MAX_BASE64_BYTES {
         return Err("backup exceeds 64 MiB".into());
     }
@@ -188,7 +197,10 @@ fn decrypt_archive(blob: &str, password: &str) -> Result<Archive, String> {
         return Err("invalid backup size".into());
     }
     if &bytes[..8] != MAGIC || u16::from_le_bytes([bytes[8], bytes[9]]) != VERSION {
-        return Err("unsupported user backup format or version".into());
+        return Err(CommandError::new(
+            codes::BACKUP_SCHEMA,
+            "unsupported user backup format or version",
+        ));
     }
     let length = u32::from_le_bytes(
         bytes[38..42]
@@ -220,7 +232,7 @@ fn decrypt_archive(blob: &str, password: &str) -> Result<Archive, String> {
     validate_archive(&archive)?;
     Ok(archive)
 }
-fn validate_archive(archive: &Archive) -> Result<(), String> {
+fn validate_archive(archive: &Archive) -> Result<(), CommandError> {
     if archive.version != VERSION
         || archive.stores.is_empty()
         || archive.stores.len() > STORE_SPECS.len()
@@ -240,11 +252,14 @@ fn validate_archive(archive: &Archive) -> Result<(), String> {
     Ok(())
 }
 
-fn sql_error(_: rusqlite::Error) -> String {
-    "backup database validation or filtering failed".into()
+fn sql_error(_: rusqlite::Error) -> CommandError {
+    CommandError::new(
+        codes::BACKUP_SQLITE,
+        "backup database validation or filtering failed",
+    )
 }
-fn io_error(_: std::io::Error) -> String {
-    "backup file operation failed".into()
+fn io_error(_: std::io::Error) -> CommandError {
+    CommandError::new(codes::BACKUP_IO, "backup file operation failed")
 }
 fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
@@ -381,7 +396,7 @@ fn clean_text(text: &str, depth: usize, filtered: &mut u64) -> String {
 /// BLOBs (including derived embeddings), FTS/shadow tables and settings tables are
 /// deliberately omitted/redacted. This is data for an owner-mediated merge, not a
 /// replacement schema. Rebuilding also removes freelist/deleted-page secret bytes.
-fn sanitized_database(source: &Connection) -> Result<(Connection, FilterStats), String> {
+fn sanitized_database(source: &Connection) -> Result<(Connection, FilterStats), CommandError> {
     source
         .execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")
         .map_err(sql_error)?;
@@ -507,7 +522,7 @@ fn sanitized_database(source: &Connection) -> Result<(Connection, FilterStats), 
     Ok((clean, stats))
 }
 
-fn open_readonly(path: &Path) -> Result<Connection, String> {
+fn open_readonly(path: &Path) -> Result<Connection, CommandError> {
     let conn =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(sql_error)?;
     conn.busy_timeout(Duration::from_secs(5))
@@ -526,7 +541,7 @@ fn open_readonly(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 // All paths come from static specs or random identifiers, never from a manifest.
-fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, CommandError> {
     let mut path = root.to_path_buf();
     for component in Path::new(relative).components() {
         if !matches!(component, std::path::Component::Normal(_)) {
@@ -535,7 +550,10 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
         path.push(component);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err("linked backup paths are not supported".into())
+                return Err(CommandError::new(
+                    codes::BACKUP_INPUT,
+                    "linked backup paths are not supported",
+                ))
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -544,14 +562,14 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     }
     Ok(path)
 }
-fn random_id() -> Result<String, String> {
+fn random_id() -> Result<String, CommandError> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| "secure random generator unavailable")?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 struct Scratch(PathBuf);
 impl Scratch {
-    fn new(parent: &Path) -> Result<Self, String> {
+    fn new(parent: &Path) -> Result<Self, CommandError> {
         let path = parent.join(format!(".user-backup-{}.pending", random_id()?));
         fs::create_dir(&path).map_err(io_error)?;
         #[cfg(unix)]
@@ -567,7 +585,7 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, CommandError> {
     let file = fs::File::open(path).map_err(io_error)?;
     if file.metadata().map_err(io_error)?.len() > MAX_STORE_BYTES as u64 {
         return Err("database exceeds 16 MiB".into());
@@ -581,14 +599,14 @@ fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     }
     Ok(bytes)
 }
-fn snapshot(conn: &Connection, path: &Path) -> Result<(), String> {
+fn snapshot(conn: &Connection, path: &Path) -> Result<(), CommandError> {
     crate::durability::snapshot_sqlite(conn, path)
         .map_err(|_| "consistent backup snapshot failed".into())
 }
-fn validate(path: &Path) -> Result<(), String> {
+fn validate(path: &Path) -> Result<(), CommandError> {
     crate::durability::validate_sqlite(path).map_err(|_| "backup SQLite validation failed".into())
 }
-fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
     crate::durability::atomic_write(path, bytes).map_err(|_| "atomic backup write failed".into())
 }
 fn missing(stores: &[ArchiveStore]) -> Vec<String> {
@@ -602,7 +620,7 @@ fn summary(
     store: &ArchiveStore,
     bytes: usize,
     current: &str,
-) -> Result<BackupStorePreview, String> {
+) -> Result<BackupStorePreview, CommandError> {
     Ok(BackupStorePreview {
         id: store.id.clone(),
         relative_path: spec(&store.id)?.relative_path.into(),
@@ -619,7 +637,7 @@ fn summary(
         receipt_id: None,
     })
 }
-fn export_backup(root: &Path, password: &str) -> Result<BackupExport, String> {
+fn export_backup(root: &Path, password: &str) -> Result<BackupExport, CommandError> {
     check_password(password)?;
     let scratch = Scratch::new(root)?;
     let mut archive = Archive {
@@ -678,7 +696,7 @@ fn inspect_backup(
     blob: &str,
     password: &str,
     stage: bool,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     let archive = decrypt_archive(blob, password)?;
     let scratch = Scratch::new(root)?;
     let mut previews = Vec::new();
@@ -819,7 +837,7 @@ const PRISTINE_STATE_COLUMNS: &[&str] = &[
     "restore_pristine",
 ];
 const OPERATIONS_COLUMNS: &[&str] = &["operation_id", "payload", "response"];
-fn watchlist_candidate(source: &Connection) -> Result<Connection, String> {
+fn watchlist_candidate(source: &Connection) -> Result<Connection, CommandError> {
     let version: i64 = source
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(sql_error)?;
@@ -902,7 +920,10 @@ fn watchlist_candidate(source: &Connection) -> Result<Connection, String> {
         .query_row("SELECT revision FROM watchlist_state", [], |r| r.get(0))
         .map_err(sql_error)?;
     if revision >= 9_007_199_254_740_990 {
-        return Err("watchlist revision out of range".into());
+        return Err(CommandError::new(
+            codes::BACKUP_INPUT,
+            "watchlist revision out of range",
+        ));
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -918,7 +939,7 @@ fn watchlist_candidate(source: &Connection) -> Result<Connection, String> {
     Ok(target)
 }
 /// Explicit owner marker, never inferred from an empty rowset or operation IDs.
-fn pristine_watchlist(source: &Connection) -> Result<bool, String> {
+fn pristine_watchlist(source: &Connection) -> Result<bool, CommandError> {
     let version: i64 = source
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(sql_error)?;
@@ -939,7 +960,7 @@ fn pristine_watchlist(source: &Connection) -> Result<bool, String> {
         .map_err(sql_error)?;
     Ok(marked == 1 && rows == 0)
 }
-fn restore_pristine_watchlist(path: &Path, incoming: &Connection) -> Result<(), String> {
+fn restore_pristine_watchlist(path: &Path, incoming: &Connection) -> Result<(), CommandError> {
     let mut current =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(sql_error)?;
     current
@@ -1005,15 +1026,18 @@ fn restore_pristine_watchlist(path: &Path, incoming: &Connection) -> Result<(), 
         )
         .map_err(sql_error)?;
     if old_revision >= 9_007_199_254_740_990 || incoming_revision >= 9_007_199_254_740_990 {
-        return Err("watchlist revision out of range".into());
+        return Err(CommandError::new(
+            codes::BACKUP_INPUT,
+            "watchlist revision out of range",
+        ));
     }
     let changed=tx.execute("UPDATE watchlist_state SET restore_pristine=0,migration_complete=1,revision=?1 WHERE singleton=1 AND restore_pristine=1",[old_revision.max(incoming_revision)+1]).map_err(sql_error)?;
     if changed != 1 {
-        return Err("pristine marker changed".into());
+        return Err(ce("pristine marker changed"));
     }
     tx.commit().map_err(sql_error)
 }
-fn destination_absent(path: &Path) -> Result<bool, String> {
+fn destination_absent(path: &Path) -> Result<bool, CommandError> {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let candidate = PathBuf::from(format!("{}{suffix}", path.to_string_lossy()));
         match fs::symlink_metadata(candidate) {
@@ -1026,7 +1050,7 @@ fn destination_absent(path: &Path) -> Result<bool, String> {
 }
 /// Atomically publish a complete, synced file WITHOUT replacement. A concurrent
 /// owner opening/creating the destination wins. No copy/delete/rename fallback.
-fn install_absent(source: &Path, destination: &Path) -> Result<bool, String> {
+fn install_absent(source: &Path, destination: &Path) -> Result<bool, CommandError> {
     if !destination_absent(destination)? {
         return Err("current database or sidecars preserved".into());
     }
@@ -1050,7 +1074,7 @@ fn install_absent(source: &Path, destination: &Path) -> Result<bool, String> {
         .and_then(|f| f.sync_all())
         .is_ok())
 }
-fn native_candidate(id: &str, source: &Connection) -> Result<Connection, String> {
+fn native_candidate(id: &str, source: &Connection) -> Result<Connection, CommandError> {
     match id {
         "watchlist" => watchlist_candidate(source),
         "agent_ledger" => agent_candidate(source),
@@ -1072,7 +1096,7 @@ const AGENT_RUN_COLUMNS: &[&str] = &[
     "error",
 ];
 const AGENT_DELETED_COLUMNS: &[&str] = &["conversation_id", "deleted_at_epoch_ms"];
-fn check_agent_schema(source: &Connection) -> Result<(), String> {
+fn check_agent_schema(source: &Connection) -> Result<(), CommandError> {
     let version: i64 = source
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(sql_error)?;
@@ -1104,7 +1128,7 @@ fn check_agent_schema(source: &Connection) -> Result<(), String> {
     }
     Ok(())
 }
-fn agent_candidate(source: &Connection) -> Result<Connection, String> {
+fn agent_candidate(source: &Connection) -> Result<Connection, CommandError> {
     check_agent_schema(source)?;
     let target = Connection::open_in_memory().map_err(sql_error)?;
     target.execute_batch("BEGIN;
@@ -1161,7 +1185,7 @@ fn agent_candidate(source: &Connection) -> Result<Connection, String> {
         UPDATE agent_runs SET status='unknown' WHERE status='running'; COMMIT;").map_err(sql_error)?;
     Ok(target)
 }
-fn receipt_path(root: &Path, blob: &str, store: &str) -> Result<PathBuf, String> {
+fn receipt_path(root: &Path, blob: &str, store: &str) -> Result<PathBuf, CommandError> {
     spec(store)?;
     let digest = Sha256::digest(blob.as_bytes())
         .iter()
@@ -1172,7 +1196,7 @@ fn receipt_path(root: &Path, blob: &str, store: &str) -> Result<PathBuf, String>
         &format!("user-backup-recovery/receipt-{digest}-{store}.json"),
     )
 }
-fn claim_receipt(path: &Path) -> Result<bool, String> {
+fn claim_receipt(path: &Path) -> Result<bool, CommandError> {
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1196,7 +1220,7 @@ fn claim_receipt(path: &Path) -> Result<bool, String> {
         Err(error) => Err(io_error(error)),
     }
 }
-fn merge_agent_rows(path: &Path, incoming: &Connection) -> Result<(), String> {
+fn merge_agent_rows(path: &Path, incoming: &Connection) -> Result<(), CommandError> {
     // Read/write without CREATE. A missing/corrupt/unknown current store is never initialized.
     let mut current =
         Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(sql_error)?;
@@ -1256,7 +1280,7 @@ fn apply_recovery(
     recovery: &Path,
     store: &mut BackupStorePreview,
     merge: bool,
-) -> Result<bool, String> {
+) -> Result<bool, CommandError> {
     let path = checked_path(root, spec(&store.id)?.relative_path)?;
     let source = open_readonly(&recovery.join(format!("{}.sqlite", store.id)))?;
     let candidate = native_candidate(&store.id, &source)?;
@@ -1312,7 +1336,7 @@ fn recover_backup(
     blob: &str,
     password: &str,
     merge: bool,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     let mut result = inspect_backup(root, blob, password, true)?;
     let recovery = checked_path(
         root,
@@ -1356,10 +1380,18 @@ fn recover_backup(
     }
     Ok(result)
 }
-fn restore_empty_backup(root: &Path, blob: &str, password: &str) -> Result<BackupPreview, String> {
+fn restore_empty_backup(
+    root: &Path,
+    blob: &str,
+    password: &str,
+) -> Result<BackupPreview, CommandError> {
     recover_backup(root, blob, password, false)
 }
-fn merge_agent_backup(root: &Path, blob: &str, password: &str) -> Result<BackupPreview, String> {
+fn merge_agent_backup(
+    root: &Path,
+    blob: &str,
+    password: &str,
+) -> Result<BackupPreview, CommandError> {
     recover_backup(root, blob, password, true)
 }
 #[cfg(test)]
@@ -1968,7 +2000,7 @@ impl Drop for ImportRequest {
 pub async fn api_user_backup_export(
     app: tauri::AppHandle,
     payload: ExportRequest,
-) -> Result<BackupExport, String> {
+) -> Result<BackupExport, CommandError> {
     use tauri::Manager;
     let root = app
         .path()
@@ -1987,21 +2019,21 @@ pub async fn api_user_backup_export(
 pub async fn api_user_backup_preview(
     app: tauri::AppHandle,
     payload: ImportRequest,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     run_import(app, payload, false).await
 }
 #[tauri::command]
 pub async fn api_user_backup_stage(
     app: tauri::AppHandle,
     payload: ImportRequest,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     run_import(app, payload, true).await
 }
 async fn run_import(
     app: tauri::AppHandle,
     payload: ImportRequest,
     stage: bool,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     use tauri::Manager;
     let root = app
         .path()
@@ -2021,7 +2053,7 @@ async fn run_import(
 pub async fn api_user_backup_restore_empty(
     app: tauri::AppHandle,
     payload: ImportRequest,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     use tauri::Manager;
     let root = app
         .path()
@@ -2041,7 +2073,7 @@ pub async fn api_user_backup_restore_empty(
 pub async fn api_user_backup_merge_agent(
     app: tauri::AppHandle,
     payload: ImportRequest,
-) -> Result<BackupPreview, String> {
+) -> Result<BackupPreview, CommandError> {
     use tauri::Manager;
     let root = app
         .path()

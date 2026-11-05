@@ -30,6 +30,14 @@ pub mod codes {
     pub const RESEARCH_INDEX_STALE: &str = "research.index_stale";
     pub const RESEARCH_PACK_INVALID: &str = "research.pack_invalid";
     pub const RESEARCH_INTERNAL: &str = "research.internal";
+
+    /// 用户备份（手动加密备份 / 恢复）。
+    pub const BACKUP_IO: &str = "backup.io";
+    pub const BACKUP_CRYPTO: &str = "backup.crypto";
+    pub const BACKUP_SQLITE: &str = "backup.sqlite";
+    pub const BACKUP_SCHEMA: &str = "backup.schema";
+    pub const BACKUP_INPUT: &str = "backup.input";
+    pub const BACKUP_INTERNAL: &str = "backup.internal";
     pub const MARKET_IO: &str = "market.io";
     pub const MARKET_NETWORK: &str = "market.network";
     pub const MARKET_PROVIDER: &str = "market.provider";
