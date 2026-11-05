@@ -47,6 +47,14 @@ jobs:
         working-directory: desktop/frontend
         run: npm ci
 
+      # tauri 打包 NSIS 前要从 GitHub Releases 现下 nsis-3.13.zip，
+      # 上游 504 会让整个打包失败（run 41999957652 就是这么挂的）→ 缓存 tools 目录复用
+      - name: Cache tauri bundler tools (NSIS)
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\tauri
+          key: tauri-bundler-tools-${{ runner.os }}-nsis-3.13-v1
+
       # build:windows = prepare:windows（拉 RAG 模型 + 构建前端 + 准备 Android 资源）
       #                + tauri build --features gepa-lab --config tauri.skip-beforebuild.json
       - name: Build installer
