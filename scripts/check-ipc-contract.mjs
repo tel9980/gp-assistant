@@ -10,7 +10,11 @@
  * 用法：node scripts/check-ipc-contract.mjs [--strict-unused]
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, extname } from "node:path";
+import { join, extname, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// 无论从哪里调用，都按仓库根目录解析相对路径（CI 里可能在子目录执行）
+process.chdir(join(dirname(fileURLToPath(import.meta.url)), ".."));
 
 const RUST_ROOT = "desktop/src-tauri/src";
 const TS_ROOTS = ["desktop/frontend/src"];

@@ -46,8 +46,7 @@ jobs:
 
       # Rust 命令名/形参与前端 invoke 调用点是否对得上
       - name: IPC contract
-        run: node ../../scripts/check-ipc-contract.mjs
-        working-directory: desktop/frontend
+        run: node scripts/check-ipc-contract.mjs
 
       - name: Bundle budget
         working-directory: desktop/frontend
