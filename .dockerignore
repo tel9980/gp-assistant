@@ -1,0 +1,12 @@
+desktop/node_modules
+desktop/frontend/node_modules
+desktop/frontend/dist
+desktop/mobile-dist
+desktop/src-tauri/target
+native/gp-core/target
+node_modules
+.git
+artifacts
+desktop/src-tauri/gen
+**/target
+**/.venv
