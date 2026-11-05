@@ -82,12 +82,12 @@ pub(crate) fn embed(model_dir: &Path, texts: &[String]) -> Result<Vec<Vec<f32>>,
     let runtime = EMBEDDING_RUNTIME.get_or_init(|| initialize_runtime(model_dir));
     let runtime = runtime.as_ref().map_err(Clone::clone)?;
     if runtime.model_dir != model_dir {
-        return Err("embedding model directory changed after initialization".to_string());
+        return Err(ce("embedding model directory changed after initialization"));
     }
     let mut model = runtime
         .model
         .lock()
-        .map_err(|_| "embedding model lock is poisoned".to_string())?;
+        .map_err(|_| ce("embedding model lock is poisoned"))?;
     let vectors = model
         .embed(texts, Some(1))
         .map_err(|error| ce(format!("failed to generate local embeddings: {error}")))?;
@@ -163,7 +163,7 @@ fn normalize_vector(mut vector: Vec<f32>) -> Result<Vec<f32>, CommandError> {
     }
     let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
     if !norm.is_finite() || norm <= f32::EPSILON {
-        return Err("embedding model returned an invalid zero vector".to_string());
+        return Err(ce("embedding model returned an invalid zero vector"));
     }
     for value in &mut vector {
         *value /= norm;

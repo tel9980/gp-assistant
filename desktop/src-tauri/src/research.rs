@@ -5442,7 +5442,9 @@ pub(crate) async fn api_research_overview(
 ) -> Result<Value, CommandError> {
     crate::runtime::run_io_bound("api_research_overview", move || {
         crate::research::with_app_store(&app, |store| {
-            let overview = store.overview(&payload)?;
+            // 只有 Windows 分支会写 overview，非 Windows 上 mut 是无用的。
+            #[allow(unused_mut)]
+            let mut overview = store.overview(&payload)?;
             #[cfg(target_os = "windows")]
             {
                 let index = store.index_status()?;
@@ -5526,7 +5528,7 @@ pub(crate) async fn api_research_query(
                             }
                             Err(error) => {
                                 let mut fallback = store.query(&retrieval_payload)?;
-                                fallback["vector_warning"] = Value::String(error);
+                                fallback["vector_warning"] = Value::String(error.to_string());
                                 fallback
                             }
                         }

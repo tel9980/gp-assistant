@@ -1,8 +1,11 @@
 use crate::error::{codes, CommandError};
 use base64::{engine::general_purpose, Engine as _};
 use futures::stream::{self, StreamExt};
+// powershell 分支只在 Windows 编译，Linux 下这条 import 会被判成 unused。
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
