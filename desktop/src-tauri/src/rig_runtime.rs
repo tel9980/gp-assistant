@@ -2880,7 +2880,8 @@ pub(crate) async fn api_agent_stream(
         })
     })
     .await
-    .and_then(|result| result)
+    .map_err(String::from)
+    .and_then(|result| result.map_err(String::from))
     {
         Ok(()) => true,
         Err(error) if crate::agent_ledger::is_conversation_deleted_error(&error) => {
@@ -2942,7 +2943,8 @@ pub(crate) async fn api_agent_stream(
                     })
                 })
                 .await
-                .and_then(|result| result);
+                .map_err(String::from)
+                .and_then(|result| result.map_err(String::from));
                 if let Err(error) = completion {
                     eprintln!("agent run ledger completion failed: {error}");
                 }
@@ -2969,7 +2971,8 @@ pub(crate) async fn api_agent_stream(
                     })
                 })
                 .await
-                .and_then(|result| result);
+                .map_err(String::from)
+                .and_then(|result| result.map_err(String::from));
                 if let Err(ledger_error) = failure_recording {
                     eprintln!("agent run ledger failure recording failed: {ledger_error}");
                 }
@@ -3059,6 +3062,7 @@ pub(crate) async fn api_agent_run_list(
             let runs = store.list_runs(limit, conversation_id.as_deref())?;
             Ok(json!({"runs": runs}))
         })
+        .map_err(String::from)
     })
     .await?
 }
@@ -3092,6 +3096,7 @@ pub(crate) async fn api_agent_run_metrics(
         crate::agent_ledger::with_app_store(&app, |store| {
             store.metrics(limit, conversation_id.as_deref())
         })
+        .map_err(String::from)
     })
     .await?
 }
@@ -3128,6 +3133,7 @@ pub(crate) async fn api_agent_run_get(
         crate::agent_ledger::with_app_store(&app, |store| {
             Ok(agent_run_detail_response(store.get_run(&run_id)?))
         })
+        .map_err(String::from)
     })
     .await?
 }
@@ -3155,6 +3161,7 @@ pub(crate) async fn api_agent_run_delete_conversation(
             let deleted = store.delete_conversation_runs(&conversation_id)?;
             Ok(json!({"deleted": deleted}))
         })
+        .map_err(String::from)
     })
     .await?
 }

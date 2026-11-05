@@ -1,4 +1,5 @@
 //! Crash-safe local file commits and consistent SQLite snapshots. No delete-before-rename.
+use crate::error::{codes, CommandError};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     fs::{self, File, OpenOptions},
@@ -7,11 +8,21 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::DURABILITY_INTERNAL, message.to_string())
+}
+
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-fn unique_temporary(path: &Path) -> Result<(PathBuf, File), String> {
+fn unique_temporary(path: &Path) -> Result<(PathBuf, File), CommandError> {
     let parent = path.parent().ok_or("target has no parent")?;
-    fs::create_dir_all(parent).map_err(|e| format!("create storage directory: {e}"))?;
+    fs::create_dir_all(parent).map_err(|e| {
+        CommandError::new(
+            codes::DURABILITY_IO,
+            format!("create storage directory: {e}"),
+        )
+    })?;
     let name = path
         .file_name()
         .ok_or("target has no filename")?
@@ -29,7 +40,7 @@ fn unique_temporary(path: &Path) -> Result<(PathBuf, File), String> {
         {
             Ok(file) => return Ok((temporary, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("create temporary file: {error}")),
+            Err(error) => return Err(ce(format!("create temporary file: {error}"))),
         }
     }
     Err("could not reserve a unique temporary file".into())
@@ -43,29 +54,33 @@ enum CommitPhase {
 }
 
 /// Success means the new file was synced and replaced in its own directory.
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
     atomic_write_with_hook(path, bytes, |_| Ok(()))
 }
-pub(crate) fn atomic_write_json(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    serde_json::from_slice::<serde_json::Value>(bytes)
-        .map_err(|e| format!("invalid JSON snapshot: {e}"))?;
+pub(crate) fn atomic_write_json(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    serde_json::from_slice::<serde_json::Value>(bytes).map_err(|e| {
+        CommandError::new(
+            codes::DURABILITY_SQLITE,
+            format!("invalid JSON snapshot: {e}"),
+        )
+    })?;
     atomic_write(path, bytes)
 }
 fn atomic_write_with_hook(
     path: &Path,
     bytes: &[u8],
-    mut hook: impl FnMut(CommitPhase) -> Result<(), String>,
-) -> Result<(), String> {
+    mut hook: impl FnMut(CommitPhase) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
     let (temporary, mut file) = unique_temporary(path)?;
     let result = (|| {
         file.write_all(bytes)
-            .map_err(|e| format!("write temporary file: {e}"))?;
+            .map_err(|e| ce(format!("write temporary file: {e}")))?;
         hook(CommitPhase::Written)?;
         file.sync_all()
-            .map_err(|e| format!("sync temporary file: {e}"))?;
+            .map_err(|e| ce(format!("sync temporary file: {e}")))?;
         drop(file);
-        if fs::read(&temporary).map_err(|e| format!("verify temporary file: {e}"))? != bytes {
-            return Err("temporary file verification failed".into());
+        if fs::read(&temporary).map_err(|e| ce(format!("verify temporary file: {e}")))? != bytes {
+            return Err(ce("temporary file verification failed"));
         }
         hook(CommitPhase::Synced)?;
         replace_file(&temporary, path)?;
@@ -79,9 +94,9 @@ fn atomic_write_with_hook(
 }
 
 /// Stream an immutable, already validated snapshot without buffering a database in RAM.
-pub(crate) fn atomic_copy(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CommandError> {
     use sha2::{Digest, Sha256};
-    let mut input = File::open(source).map_err(|e| format!("open snapshot: {e}"))?;
+    let mut input = File::open(source).map_err(|e| ce(format!("open snapshot: {e}")))?;
     let (temporary, mut output) = unique_temporary(destination)?;
     let result = (|| {
         let mut buffer = [0u8; 64 * 1024];
@@ -89,18 +104,18 @@ pub(crate) fn atomic_copy(source: &Path, destination: &Path) -> Result<(), Strin
         loop {
             let count = input
                 .read(&mut buffer)
-                .map_err(|e| format!("read snapshot: {e}"))?;
+                .map_err(|e| ce(format!("read snapshot: {e}")))?;
             if count == 0 {
                 break;
             }
             original.update(&buffer[..count]);
             output
                 .write_all(&buffer[..count])
-                .map_err(|e| format!("write snapshot: {e}"))?;
+                .map_err(|e| ce(format!("write snapshot: {e}")))?;
         }
         output
             .sync_all()
-            .map_err(|e| format!("sync snapshot: {e}"))?;
+            .map_err(|e| ce(format!("sync snapshot: {e}")))?;
         drop(output);
         let mut verify = File::open(&temporary).map_err(|e| e.to_string())?;
         let mut copied = Sha256::new();
@@ -113,7 +128,7 @@ pub(crate) fn atomic_copy(source: &Path, destination: &Path) -> Result<(), Strin
         }
         drop(verify);
         if original.finalize() != copied.finalize() {
-            return Err("snapshot copy checksum mismatch".into());
+            return Err(ce("snapshot copy checksum mismatch"));
         }
         replace_file(&temporary, destination)?;
         sync_parent(destination)
@@ -125,7 +140,7 @@ pub(crate) fn atomic_copy(source: &Path, destination: &Path) -> Result<(), Strin
 }
 
 #[cfg(windows)]
-fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
+fn replace_file(source: &Path, destination: &Path) -> Result<(), CommandError> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     extern "system" {
@@ -139,67 +154,67 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
         .collect();
     // Same-volume replacement with write-through. No copy fallback and no deletion gap.
     if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0x1 | 0x8) } == 0 {
-        return Err(format!(
+        return Err(ce(format!(
             "atomic file replacement failed: {}",
             std::io::Error::last_os_error()
-        ));
+        )));
     }
     Ok(())
 }
 #[cfg(not(windows))]
-fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::rename(source, destination).map_err(|e| format!("atomic file replacement failed: {e}"))
+fn replace_file(source: &Path, destination: &Path) -> Result<(), CommandError> {
+    fs::rename(source, destination).map_err(|e| ce(format!("atomic file replacement failed: {e}")))
 }
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> Result<(), String> {
+fn sync_parent(path: &Path) -> Result<(), CommandError> {
     File::open(path.parent().ok_or("target has no parent")?)
         .and_then(|f| f.sync_all())
-        .map_err(|e| format!("sync storage directory: {e}"))
+        .map_err(|e| ce(format!("sync storage directory: {e}")))
 }
 #[cfg(not(unix))]
-fn sync_parent(_: &Path) -> Result<(), String> {
+fn sync_parent(_: &Path) -> Result<(), CommandError> {
     Ok(())
 }
 
-pub(crate) fn configure_user_connection(connection: &Connection) -> Result<(), String> {
+pub(crate) fn configure_user_connection(connection: &Connection) -> Result<(), CommandError> {
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     connection
         .execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-        .map_err(|e| format!("configure durable user database: {e}"))
+        .map_err(|e| ce(format!("configure durable user database: {e}")))
 }
 /// A successful SQL statement is not necessarily a successful checkpoint (SQLITE_BUSY).
-pub(crate) fn checkpoint(connection: &Connection) -> Result<(), String> {
+pub(crate) fn checkpoint(connection: &Connection) -> Result<(), CommandError> {
     let (busy, total, done): (i64, i64, i64) = connection
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
-        .map_err(|e| format!("checkpoint failed: {e}"))?;
+        .map_err(|e| ce(format!("checkpoint failed: {e}")))?;
     if busy != 0 || (total >= 0 && done < total) {
-        return Err("database is busy; checkpoint did not complete".into());
+        return Err(ce("database is busy; checkpoint did not complete"));
     }
     Ok(())
 }
-pub(crate) fn validate_sqlite_header(path: &Path) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|e| format!("cannot inspect database: {e}"))?;
+pub(crate) fn validate_sqlite_header(path: &Path) -> Result<(), CommandError> {
+    let mut file = File::open(path).map_err(|e| ce(format!("cannot inspect database: {e}")))?;
     let mut header = [0u8; 16];
     file.read_exact(&mut header)
         .map_err(|_| "database header is incomplete; original preserved".to_string())?;
     if &header != b"SQLite format 3\0" {
-        return Err("invalid database header; original preserved".into());
+        return Err(ce("invalid database header; original preserved"));
     }
     Ok(())
 }
-pub(crate) fn validate_sqlite(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_sqlite(path: &Path) -> Result<(), CommandError> {
     validate_sqlite_header(path)?;
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("cannot open database for validation: {e}"))?;
+        .map_err(|e| ce(format!("cannot open database for validation: {e}")))?;
     let result: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(|e| format!("database integrity check failed: {e}"))?;
+        .map_err(|e| ce(format!("database integrity check failed: {e}")))?;
     if result != "ok" {
-        return Err("database integrity check failed; original preserved".into());
+        return Err(ce("database integrity check failed; original preserved"));
     }
     Ok(())
 }
@@ -209,7 +224,7 @@ pub(crate) fn backup_before_migration(
     path: &Path,
     current: i64,
     target: i64,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     if current >= target {
         return Ok(());
     }
@@ -223,25 +238,30 @@ pub(crate) fn backup_before_migration(
         TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     if backup.exists() {
-        return Err("migration snapshot already exists; refusing to overwrite".into());
+        return Err(ce(
+            "migration snapshot already exists; refusing to overwrite",
+        ));
     }
     snapshot_sqlite(connection, &backup)
 }
 /// VACUUM INTO takes a SQLite-consistent snapshot, including committed WAL pages.
-pub(crate) fn snapshot_sqlite(connection: &Connection, destination: &Path) -> Result<(), String> {
+pub(crate) fn snapshot_sqlite(
+    connection: &Connection,
+    destination: &Path,
+) -> Result<(), CommandError> {
     let (temporary, file) = unique_temporary(destination)?;
     drop(file);
     let result = (|| {
         connection
             .execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])
-            .map_err(|e| format!("create consistent database snapshot: {e}"))?;
+            .map_err(|e| ce(format!("create consistent database snapshot: {e}")))?;
         validate_sqlite(&temporary)?;
         OpenOptions::new()
             .read(true)
             .write(true)
             .open(&temporary)
             .and_then(|f| f.sync_all())
-            .map_err(|e| format!("sync database snapshot: {e}"))?;
+            .map_err(|e| ce(format!("sync database snapshot: {e}")))?;
         replace_file(&temporary, destination)?;
         sync_parent(destination)
     })();

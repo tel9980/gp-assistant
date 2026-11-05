@@ -2,9 +2,15 @@
 //! Snapshots are immutable recovery evidence; no cleanup is attempted on the error path.
 use super::*;
 use crate::durability;
+use crate::error::{codes, CommandError};
 
 const MANIFEST: &str = "research-delivery.json";
 const GENERATION: &str = "delivery_generation";
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::RESEARCH_RECOVERY_INTERNAL, message.to_string())
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -45,23 +51,23 @@ fn artifact(root: &Path, generation: u64, suffix: &str) -> PathBuf {
     root.join(format!("research.sqlite.g{generation}.{suffix}"))
 }
 
-pub(super) fn validate_header(path: &Path) -> Result<(), String> {
+pub(super) fn validate_header(path: &Path) -> Result<(), CommandError> {
     let mut file =
-        fs::File::open(path).map_err(|e| format!("cannot inspect research database: {e}"))?;
+        fs::File::open(path).map_err(|e| ce(format!("cannot inspect research database: {e}")))?;
     let mut header = [0; 16];
     if file.metadata().map_err(|e| e.to_string())?.len() < 100
         || file.read_exact(&mut header).is_err()
         || &header != b"SQLite format 3\0"
     {
-        return Err(format!(
+        return Err(ce(format!(
             "invalid research database {}; original preserved",
             path.display()
-        ));
+        )));
     }
     Ok(())
 }
 
-pub(super) fn validate_database(path: &Path) -> Result<(), String> {
+pub(super) fn validate_database(path: &Path) -> Result<(), CommandError> {
     validate_header(path)?; // SQLite considers a zero-byte file a valid empty DB; we must not.
     durability::validate_sqlite(path)?;
     let connection = read_only(path)?;
@@ -83,7 +89,7 @@ pub(super) fn validate_database(path: &Path) -> Result<(), String> {
             .map_err(|e| e.to_string())?
             == 1;
     if count != 7 && !legacy_v2_documents_only {
-        return Err("unrecognized research schema; original preserved".into());
+        return Err(ce("unrecognized research schema; original preserved"));
     }
     let foreign_key_error = connection
         .prepare("PRAGMA foreign_key_check")
@@ -91,17 +97,19 @@ pub(super) fn validate_database(path: &Path) -> Result<(), String> {
         .exists([])
         .map_err(|e| e.to_string())?;
     if foreign_key_error {
-        return Err("research foreign key validation failed; original preserved".into());
+        return Err(ce(
+            "research foreign key validation failed; original preserved",
+        ));
     }
     Ok(())
 }
 
-fn read_only(path: &Path) -> Result<Connection, String> {
+fn read_only(path: &Path) -> Result<Connection, CommandError> {
     Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("cannot read research database: {e}"))
+        .map_err(|e| ce(format!("cannot read research database: {e}")))
 }
 
-fn generation(path: &Path) -> Result<u64, String> {
+fn generation(path: &Path) -> Result<u64, CommandError> {
     let value: Option<String> = read_only(path)?
         .query_row(
             "SELECT value FROM research_metadata WHERE key=?1",
@@ -128,13 +136,17 @@ fn safe_rollback_name(name: &str) -> bool {
             .is_some()
 }
 
-fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
+fn read_manifest(root: &Path) -> Result<Option<Manifest>, CommandError> {
     let path = root.join(MANIFEST);
     if !path.exists() {
         return Ok(None);
     }
     let manifest: Manifest = serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("invalid research delivery manifest; originals preserved: {e}"))?;
+        .map_err(|e| {
+            ce(format!(
+                "invalid research delivery manifest; originals preserved: {e}"
+            ))
+        })?;
     if manifest.version != 1
         || manifest.generation <= manifest.previous_generation
         || manifest
@@ -142,7 +154,9 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
             .as_deref()
             .is_some_and(|name| !safe_rollback_name(name))
     {
-        return Err("invalid research delivery manifest identity; originals preserved".into());
+        return Err(ce(
+            "invalid research delivery manifest identity; originals preserved",
+        ));
     }
     let valid_hash =
         |hash: &str| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
@@ -177,14 +191,14 @@ fn read_manifest(root: &Path) -> Result<Option<Manifest>, String> {
     Ok(Some(manifest))
 }
 
-fn write_manifest(root: &Path, manifest: &Manifest) -> Result<(), String> {
+fn write_manifest(root: &Path, manifest: &Manifest) -> Result<(), CommandError> {
     durability::atomic_write(
         &root.join(MANIFEST),
         &serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?,
     )
 }
 
-fn has_artifacts(root: &Path) -> Result<bool, String> {
+fn has_artifacts(root: &Path) -> Result<bool, CommandError> {
     if !root.exists() {
         return Ok(false);
     }
@@ -198,7 +212,7 @@ fn has_artifacts(root: &Path) -> Result<bool, String> {
     Ok(false)
 }
 
-pub(super) fn needs_recovery(root: &Path) -> Result<bool, String> {
+pub(super) fn needs_recovery(root: &Path) -> Result<bool, CommandError> {
     let main = root.join("research.sqlite");
     if !main.exists() {
         return has_artifacts(root);
@@ -229,7 +243,7 @@ fn forget_main(path: &Path) {
     invalidate_vector_cache(path);
 }
 
-fn digest(path: &Path) -> Result<String, String> {
+fn digest(path: &Path) -> Result<String, CommandError> {
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 64 * 1024];
@@ -247,19 +261,19 @@ fn digest(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-fn validate_snapshot(path: &Path, expected: &Option<String>) -> Result<(), String> {
+fn validate_snapshot(path: &Path, expected: &Option<String>) -> Result<(), CommandError> {
     validate_database(path)?;
     if expected.as_ref() != Some(&digest(path)?) {
-        return Err(format!(
+        return Err(ce(format!(
             "research recovery snapshot checksum mismatch: {}; originals preserved",
             path.display()
-        ));
+        )));
     }
     Ok(())
 }
 
 /// Only remove sidecars after checking all checkpoint result columns AND closing the handle.
-fn quiesce(path: &Path) -> Result<(), String> {
+fn quiesce(path: &Path) -> Result<(), CommandError> {
     let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|e| e.to_string())?;
     configure_connection(&connection)?;
@@ -271,11 +285,11 @@ fn quiesce(path: &Path) -> Result<(), String> {
         .write(true)
         .open(path)
         .and_then(|file| file.sync_all())
-        .map_err(|e| format!("failed to sync research database: {e}"))?;
-    remove_sqlite_sidecars(path).map_err(String::from)
+        .map_err(|e| ce(format!("failed to sync research database: {e}")))?;
+    remove_sqlite_sidecars(path).map_err(|error| ce(error))
 }
 
-pub(super) fn recover(root: &Path) -> Result<(), String> {
+pub(super) fn recover(root: &Path) -> Result<(), CommandError> {
     let main = root.join("research.sqlite");
     // Never overwrite a corrupt main with any backup, or initialize it as an empty store.
     if main.exists() {
@@ -283,7 +297,7 @@ pub(super) fn recover(root: &Path) -> Result<(), String> {
     }
     let Some(mut manifest) = read_manifest(root)? else {
         if !main.exists() && has_artifacts(root)? {
-            return Err("research main is missing without a delivery manifest; originals preserved for manual recovery".into());
+            return Err(ce("research main is missing without a delivery manifest; originals preserved for manual recovery"));
         }
         return Ok(());
     };
@@ -295,7 +309,7 @@ pub(super) fn recover(root: &Path) -> Result<(), String> {
     match manifest.phase {
         Phase::Committed => {
             if current != Some(manifest.generation) {
-                return Err("committed research main is missing or has the wrong generation; originals preserved".into());
+                return Err(ce("committed research main is missing or has the wrong generation; originals preserved"));
             }
             // The committed main may contain newer user writes: NEVER replace it with a snapshot.
             return Ok(());
@@ -312,12 +326,12 @@ pub(super) fn recover(root: &Path) -> Result<(), String> {
     }
     if current != Some(manifest.previous_generation) {
         if current.is_some() && current != Some(manifest.generation) {
-            return Err("unexpected research generation; originals preserved".into());
+            return Err(ce("unexpected research generation; originals preserved"));
         }
         let old = artifact(root, manifest.generation, "previous");
         validate_snapshot(&old, &manifest.old_sha256)?;
         if generation(&old)? != manifest.previous_generation {
-            return Err("invalid old research generation".into());
+            return Err(ce("invalid old research generation"));
         }
         if main.exists() {
             // Preserve even the uncommitted main before reverting it; never delete original evidence.
@@ -344,7 +358,7 @@ pub(super) fn recover(root: &Path) -> Result<(), String> {
     write_manifest(root, &manifest)
 }
 
-pub(super) fn rollback_source(root: &Path) -> Result<PathBuf, String> {
+pub(super) fn rollback_source(root: &Path) -> Result<PathBuf, CommandError> {
     let manifest = read_manifest(root)?;
     let name = match &manifest {
         Some(manifest) => manifest.rollback_file.clone(),
@@ -353,7 +367,7 @@ pub(super) fn rollback_source(root: &Path) -> Result<PathBuf, String> {
     .ok_or("no research database rollback is available")?;
     let path = root.join(name);
     if !path.exists() {
-        return Err("no research database rollback is available".into());
+        return Err(ce("no research database rollback is available"));
     }
     if let Some(expected) = manifest.and_then(|m| m.rollback_sha256) {
         validate_snapshot(&path, &Some(expected))?;
@@ -363,16 +377,16 @@ pub(super) fn rollback_source(root: &Path) -> Result<PathBuf, String> {
 
 pub(super) fn deliver(
     root: &Path,
-    build: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<(), String> {
+    build: impl FnOnce(&Path) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
     deliver_with_hook(root, build, |_| Ok(()))
 }
 
 fn deliver_with_hook(
     root: &Path,
-    build: impl FnOnce(&Path) -> Result<(), String>,
-    mut hook: impl FnMut(FaultPhase) -> Result<(), String>,
-) -> Result<(), String> {
+    build: impl FnOnce(&Path) -> Result<(), CommandError>,
+    mut hook: impl FnMut(FaultPhase) -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     recover(root)?;
     let main = root.join("research.sqlite");
@@ -447,7 +461,7 @@ fn deliver_with_hook(
     hook(FaultPhase::Activated)?;
     validate_database(&main)?;
     if generation(&main)? != next {
-        return Err("activated research generation mismatch".into());
+        return Err(ce("activated research generation mismatch"));
     }
     manifest.phase = Phase::Committed;
     manifest.rollback_file = Some(format!("research.sqlite.g{next}.previous"));
@@ -490,12 +504,11 @@ mod tests {
             .unwrap();
         store
     }
-    fn staged_document(path: &Path) -> Result<(), String> {
-        ResearchStore::open(path)
-            .map_err(String::from)?
+    fn staged_document(path: &Path) -> Result<(), CommandError> {
+        ResearchStore::open(path)?
             .ingest_documents(&[document("replacement research evidence")])
             .map(|_| ())
-            .map_err(String::from)
+            .map_err(|error| ce(error))
     }
     fn content(root: &TempRoot) -> String {
         read_only(&root.main())
@@ -523,12 +536,12 @@ mod tests {
             seed(&root);
             let result = deliver_with_hook(&root.0, staged_document, |at| {
                 if at == phase {
-                    Err(format!("injected {phase:?}"))
+                    Err(ce(format!("injected {phase:?}")))
                 } else {
                     Ok(())
                 }
             });
-            assert_eq!(result, Err(format!("injected {phase:?}")));
+            assert_eq!(result, Err(ce(format!("injected {phase:?}"))));
             let attempted = read_manifest(&root.0).unwrap().unwrap().generation;
             recover(&root.0).unwrap();
             recover(&root.0).unwrap();

@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use crate::market::{
     build_http_client_with_proxy, cached_market_data, epoch_millis, normalize_stock_code,
     powershell_http_get_bytes_with_headers, read_json_file,
@@ -27,6 +28,11 @@ const CHAIN_RELATION_TYPES: [&str; 3] =
 const NEWS_TIMEOUT_SECS: u64 = 8;
 const NEWS_ANDROID_TIMEOUT_SECS: u64 = 5;
 const NEWS_MAX_CACHE_ITEMS: usize = 2_000;
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::NEWS_RAG_INTERNAL, message.to_string())
+}
+
 static NEWS_CACHE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[cfg(test)]
 static NEWS_CACHE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -34,7 +40,7 @@ static NEWS_CACHE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic:
 pub(crate) async fn api_news_rag_impl(
     app: tauri::AppHandle,
     payload: Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let data = cached_market_data(&app)?;
     let stock_by_code = stock_map(&data);
     let scope_codes = scope_codes(&payload, &stock_by_code);
@@ -691,22 +697,20 @@ fn configured_urls_with_defaults(env_name: &str, defaults: &[&str]) -> Vec<Strin
     urls
 }
 
-fn validate_public_source_url(raw: &str) -> Result<reqwest::Url, String> {
+fn validate_public_source_url(raw: &str) -> Result<reqwest::Url, CommandError> {
     let url = reqwest::Url::parse(raw.trim()).map_err(|_| "URL 格式不正确".to_string())?;
     if url.scheme() != "https" {
-        return Err("只允许 HTTPS 来源".to_string());
+        return Err(ce("只允许 HTTPS 来源"));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("来源 URL 不能包含凭据".to_string());
+        return Err(ce("来源 URL 不能包含凭据"));
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "来源 URL 缺少主机名".to_string())?;
+    let host = url.host_str().ok_or_else(|| ce("来源 URL 缺少主机名"))?;
     if host.eq_ignore_ascii_case("localhost")
         || host.eq_ignore_ascii_case("localhost.localdomain")
         || host.ends_with(".local")
     {
-        return Err("来源主机不允许使用本机或本地域名".to_string());
+        return Err(ce("来源主机不允许使用本机或本地域名"));
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
         let blocked = match ip {
@@ -721,7 +725,7 @@ fn validate_public_source_url(raw: &str) -> Result<reqwest::Url, String> {
             }
         };
         if blocked {
-            return Err("来源主机不允许使用内网地址".to_string());
+            return Err(ce("来源主机不允许使用内网地址"));
         }
     }
     Ok(url)
@@ -1069,7 +1073,7 @@ async fn fetch_us_market_brief() -> Value {
     }
 }
 
-async fn fetch_sina_us_market_brief(client: &reqwest::Client) -> Result<Value, String> {
+async fn fetch_sina_us_market_brief(client: &reqwest::Client) -> Result<Value, CommandError> {
     let url = "https://hq.sinajs.cn/list=gb_dji,gb_ixic,gb_inx,gb_vix";
     let text = http_get_text_with_headers_timeout(
         client,
@@ -1078,11 +1082,11 @@ async fn fetch_sina_us_market_brief(client: &reqwest::Client) -> Result<Value, S
         env_usize("GP_NEWS_US_MARKET_TIMEOUT_SECS", 5, 2, 15) as u64,
     )
     .await
-    .map_err(|error| format!("Sina US market request failed: {error}"))?;
+    .map_err(|error| ce(format!("Sina US market request failed: {error}")))?;
     parse_sina_us_market_brief(&text)
 }
 
-fn parse_sina_us_market_brief(text: &str) -> Result<Value, String> {
+fn parse_sina_us_market_brief(text: &str) -> Result<Value, CommandError> {
     let specs = [
         ("gb_dji", "DJI", "道琼斯"),
         ("gb_ixic", "IXIC", "纳斯达克"),
@@ -1099,7 +1103,7 @@ fn parse_sina_us_market_brief(text: &str) -> Result<Value, String> {
         }
     }
     if items.is_empty() {
-        return Err("Sina US market payload did not include usable indexes".to_string());
+        return Err(ce("Sina US market payload did not include usable indexes"));
     }
     Ok(build_us_market_brief(items, "新浪财经全球指数", Vec::new()))
 }
@@ -1241,7 +1245,7 @@ async fn fetch_guba_community(
     stocks: &[Value],
     relations: &[Value],
     days: i64,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let mut items = Vec::new();
     let cutoff = cutoff_epoch_millis(days);
     let relation_map = relation_map(relations);
@@ -1282,7 +1286,7 @@ async fn fetch_eastmoney_stock_news(
     stocks: &[Value],
     relations: &[Value],
     days: i64,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let mut items = Vec::new();
     let cutoff = cutoff_epoch_millis(days);
     let relation_map = relation_map(relations);
@@ -1304,7 +1308,7 @@ async fn fetch_eastmoney_stock_news(
         }).to_string();
         let now = epoch_millis().to_string();
         let mut url = reqwest::Url::parse("https://search-api-web.eastmoney.com/search/jsonp")
-            .map_err(|error| format!("Eastmoney news URL parse failed: {error}"))?;
+            .map_err(|error| ce(format!("Eastmoney news URL parse failed: {error}")))?;
         url.query_pairs_mut()
             .append_pair("cb", &callback)
             .append_pair("param", &param)
@@ -1313,9 +1317,8 @@ async fn fetch_eastmoney_stock_news(
         let text =
             http_get_text_with_headers_timeout(client, url.as_str(), &referer, NEWS_TIMEOUT_SECS)
                 .await
-                .map_err(|error| format!("Eastmoney news request failed: {error}"))?;
-        let data =
-            parse_jsonp(&text).ok_or_else(|| "Eastmoney news JSONP parse failed".to_string())?;
+                .map_err(|error| ce(format!("Eastmoney news request failed: {error}")))?;
+        let data = parse_jsonp(&text).ok_or_else(|| ce("Eastmoney news JSONP parse failed"))?;
         let rows = data
             .get("result")
             .and_then(|value| value.get("cmsArticleWebOld"))
@@ -1365,7 +1368,7 @@ async fn fetch_sina_stock_news(
     stocks: &[Value],
     relations: &[Value],
     days: i64,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let mut items = Vec::new();
     let cutoff = cutoff_epoch_millis(days);
     let relation_map = relation_map(relations);
@@ -1402,7 +1405,7 @@ async fn fetch_ths_stock_news(
     stocks: &[Value],
     relations: &[Value],
     days: i64,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, CommandError> {
     let mut items = Vec::new();
     let cutoff = cutoff_epoch_millis(days);
     let relation_map = relation_map(relations);
@@ -1754,7 +1757,7 @@ fn news_item(mut item: Value) -> Value {
     item
 }
 
-fn read_news_cache_items(path: &Path) -> Result<Vec<Value>, String> {
+fn read_news_cache_items(path: &Path) -> Result<Vec<Value>, CommandError> {
     let app_data = news_cache_app_data_dir(path)?;
     let database_path = crate::external_data::store_path(&app_data);
     if database_path.exists() {
@@ -1801,7 +1804,7 @@ fn read_news_cache_items(path: &Path) -> Result<Vec<Value>, String> {
     read_news_cache_legacy(path)
 }
 
-fn read_news_cache_legacy(path: &Path) -> Result<Vec<Value>, String> {
+fn read_news_cache_legacy(path: &Path) -> Result<Vec<Value>, CommandError> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -1816,7 +1819,7 @@ fn read_news_cache_legacy(path: &Path) -> Result<Vec<Value>, String> {
 fn import_news_cache(
     store: &mut crate::external_data::DataStore,
     path: &Path,
-) -> Result<crate::external_data::LegacyImportReport, String> {
+) -> Result<crate::external_data::LegacyImportReport, CommandError> {
     crate::external_data::import_legacy_json(
         store,
         path,
@@ -1832,6 +1835,7 @@ fn import_news_cache(
             ))
         },
     )
+    .map_err(CommandError::from)
 }
 
 fn news_items_to_external_records(items: Vec<Value>) -> Vec<crate::external_data::StoredRecord> {
@@ -1915,7 +1919,7 @@ fn canonical_news_url_hash(item: &Value) -> Option<String> {
     )
 }
 
-fn merge_into_news_cache(path: &Path, fetched: Vec<Value>) -> Result<Vec<Value>, String> {
+fn merge_into_news_cache(path: &Path, fetched: Vec<Value>) -> Result<Vec<Value>, CommandError> {
     let cache_lock = NEWS_CACHE_WRITE_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = cache_lock
         .lock()
@@ -1926,7 +1930,7 @@ fn merge_into_news_cache(path: &Path, fetched: Vec<Value>) -> Result<Vec<Value>,
     Ok(merged)
 }
 
-fn write_news_cache_items(path: &Path, items: &[Value]) -> Result<(), String> {
+fn write_news_cache_items(path: &Path, items: &[Value]) -> Result<(), CommandError> {
     let app_data = news_cache_app_data_dir(path)?;
     let database_path = crate::external_data::store_path(&app_data);
     let mut store = crate::external_data::DataStore::open(&database_path)?;
@@ -1942,40 +1946,40 @@ fn write_news_cache_items(path: &Path, items: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
-fn write_news_cache_legacy(path: &Path, items: &[Value]) -> Result<(), String> {
+fn write_news_cache_legacy(path: &Path, items: &[Value]) -> Result<(), CommandError> {
     let root = path
         .parent()
-        .ok_or_else(|| "news cache path has no parent".to_string())?;
-    fs::create_dir_all(root).map_err(|error| format!("创建消息缓存目录失败：{error}"))?;
+        .ok_or_else(|| ce("news cache path has no parent"))?;
+    fs::create_dir_all(root).map_err(|error| ce(format!("创建消息缓存目录失败：{error}")))?;
     let payload =
         json!({"schema_version": 1, "updated_at_epoch_ms": epoch_millis(), "items": items});
     let bytes =
-        serde_json::to_vec(&payload).map_err(|error| format!("序列化消息缓存失败：{error}"))?;
+        serde_json::to_vec(&payload).map_err(|error| ce(format!("序列化消息缓存失败：{error}")))?;
     crate::durability::atomic_write_json(path, &bytes)
 }
 
-fn news_cache_app_data_dir(path: &Path) -> Result<PathBuf, String> {
+fn news_cache_app_data_dir(path: &Path) -> Result<PathBuf, CommandError> {
     let parent = path
         .parent()
-        .ok_or_else(|| "news cache path has no parent".to_string())?;
+        .ok_or_else(|| ce("news cache path has no parent"))?;
     if parent.file_name().and_then(|name| name.to_str()) == Some("news") {
         return parent
             .parent()
             .map(Path::to_path_buf)
-            .ok_or_else(|| "news cache path has no app data ancestor".to_string());
+            .ok_or_else(|| ce("news cache path has no app data ancestor"));
     }
     let file_stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .ok_or_else(|| "news cache path has no file stem".to_string())?;
+        .ok_or_else(|| ce("news cache path has no file stem"))?;
     Ok(parent.join(file_stem))
 }
 
-fn news_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn news_cache_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("获取应用数据目录失败：{error}"))?;
+        .map_err(|error| ce(format!("获取应用数据目录失败：{error}")))?;
     root.push("news");
     root.push(NEWS_CACHE_FILE);
     Ok(root)
@@ -2214,7 +2218,7 @@ pub(crate) async fn synthesize_research_answer(
     llm_value: Option<&Value>,
     question: &str,
     citations: &[Value],
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, CommandError> {
     let Some(config) = resolve_llm_config(llm_value) else {
         return Ok(None);
     };
@@ -2229,7 +2233,7 @@ pub(crate) async fn synthesize_research_answer(
         Duration::from_secs(config.timeout_seconds),
         None,
     )
-    .map_err(|error| format!("create research LLM client failed: {error}"))?;
+    .map_err(|error| ce(format!("create research LLM client failed: {error}")))?;
     let system_prompt = "你是证据约束的股票研究助手。只能依据给定证据回答；每个事实结论必须紧邻引用 [C1] 这类已提供编号。社区证据不能单独支撑事实。证据不足时明确说待核查。不得创造引用编号。返回 JSON：{\"answer\":\"...\"}。";
     let evidence_payload = json!({
         "question": question,
@@ -2268,7 +2272,7 @@ pub(crate) async fn synthesize_research_answer(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "research model response is missing answer".to_string())?;
+        .ok_or_else(|| ce("research model response is missing answer"))?;
     Ok(Some(answer.to_string()))
 }
 
@@ -2404,7 +2408,7 @@ async fn call_news_llm(
     evidence: &[Value],
     stock_by_code: &HashMap<String, Value>,
     findings: &[Value],
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let client = build_http_client_with_proxy(
         config
             .custom_user_agent
@@ -2413,7 +2417,7 @@ async fn call_news_llm(
         Duration::from_secs(config.timeout_seconds),
         None,
     )
-    .map_err(|error| format!("create LLM HTTP client failed: {error}"))?;
+    .map_err(|error| ce(format!("create LLM HTTP client failed: {error}")))?;
     let payload = news_llm_payload(scope_codes, relations, evidence, stock_by_code, findings);
     let mut request = json!({"model": config.model, "messages": [{"role": "system", "content": news_llm_system_prompt()}, {"role": "user", "content": serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string())}], "temperature": config.temperature});
     if config.json_mode {
@@ -2429,7 +2433,9 @@ async fn call_news_llm(
             post_llm_request(&client, config, &fallback)
                 .await
                 .map_err(|second_error| {
-                    format!("{first_error}; retry without JSON mode failed: {second_error}")
+                    ce(format!(
+                        "{first_error}; retry without JSON mode failed: {second_error}"
+                    ))
                 })
         }
         Err(error) => Err(error),
@@ -2440,16 +2446,16 @@ async fn post_llm_request(
     client: &reqwest::Client,
     config: &LlmConfig,
     request: &Value,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     let url = crate::llm::llm_inference_endpoint(
         &config.base_url,
         &config.api_format,
         config.endpoint_mode == "full_url",
     )
-    .map_err(|error| format!("LLM endpoint is invalid: {error}"))?;
+    .map_err(|error| ce(format!("LLM endpoint is invalid: {error}")))?;
     let outbound_request = adapt_news_llm_request(request, &config.api_format);
     let body = serde_json::to_vec(&outbound_request)
-        .map_err(|error| format!("serialize LLM request failed: {error}"))?;
+        .map_err(|error| ce(format!("serialize LLM request failed: {error}")))?;
     let mut builder = client
         .post(url)
         .header("Content-Type", "application/json")
@@ -2471,15 +2477,18 @@ async fn post_llm_request(
     let response = builder
         .send()
         .await
-        .map_err(|error| format!("LLM request failed: {error}"))?;
+        .map_err(|error| ce(format!("LLM request failed: {error}")))?;
     let status = response.status();
     let bytes = response
         .bytes()
         .await
-        .map_err(|error| format!("read LLM response failed: {error}"))?;
+        .map_err(|error| ce(format!("read LLM response failed: {error}")))?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     if !status.is_success() {
-        return Err(format!("LLM HTTP {status}: {}", limit_chars(&text, 300)));
+        return Err(ce(format!(
+            "LLM HTTP {status}: {}",
+            limit_chars(&text, 300)
+        )));
     }
     let response_json: Value = serde_json::from_str(&text).map_err(|error| {
         format!(
@@ -2993,7 +3002,7 @@ fn current_iso_like() -> String {
         .unwrap_or_default();
     format!("{seconds}")
 }
-async fn http_get_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+async fn http_get_text(client: &reqwest::Client, url: &str) -> Result<String, CommandError> {
     http_get_text_with_headers_timeout(client, url, "", NEWS_TIMEOUT_SECS).await
 }
 async fn http_get_text_with_headers_timeout(
@@ -3001,7 +3010,7 @@ async fn http_get_text_with_headers_timeout(
     url: &str,
     referer: &str,
     timeout_secs: u64,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let user_agent = "Mozilla/5.0 GuXuanYou/0.3 news-rag";
     match powershell_http_get_bytes_with_headers(url, timeout_secs, user_agent, referer) {
         Ok(bytes) => return Ok(decode_http_text(&bytes)),
@@ -3017,16 +3026,16 @@ async fn http_get_text_with_headers_timeout(
                 )
             })?;
             if !response.status().is_success() {
-                return Err(format!(
+                return Err(ce(format!(
                     "PowerShell HTTP fallback failed: {}; reqwest GET {url} HTTP {}",
                     limit_chars(&powershell_error, 180),
                     response.status()
-                ));
+                )));
             }
             let bytes = response
                 .bytes()
                 .await
-                .map_err(|error| format!("GET {url} body read failed: {error}"))?;
+                .map_err(|error| ce(format!("GET {url} body read failed: {error}")))?;
             Ok(decode_http_text(&bytes))
         }
     }
@@ -3045,16 +3054,16 @@ fn parse_jsonp(text: &str) -> Option<Value> {
     let end = text.rfind(')')?;
     serde_json::from_str(text.get(start..end)?.trim()).ok()
 }
-fn parse_json_response(content: &str) -> Result<Value, String> {
+fn parse_json_response(content: &str) -> Result<Value, CommandError> {
     serde_json::from_str(content).or_else(|_| {
         let start = content
             .find('{')
-            .ok_or_else(|| "LLM response does not contain JSON object".to_string())?;
+            .ok_or_else(|| ce("LLM response does not contain JSON object"))?;
         let end = content
             .rfind('}')
-            .ok_or_else(|| "LLM response does not contain complete JSON object".to_string())?;
+            .ok_or_else(|| ce("LLM response does not contain complete JSON object"))?;
         serde_json::from_str(&content[start..=end])
-            .map_err(|error| format!("parse embedded LLM JSON failed: {error}"))
+            .map_err(|error| ce(format!("parse embedded LLM JSON failed: {error}")))
     })
 }
 fn extract_embedded_object(html: &str, var_name: &str) -> Option<String> {
@@ -3799,7 +3808,10 @@ mod tests {
 }
 
 #[tauri::command]
-pub(crate) async fn api_news_rag(app: tauri::AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) async fn api_news_rag(
+    app: tauri::AppHandle,
+    payload: Value,
+) -> Result<Value, CommandError> {
     let mut result = crate::runtime::with_heavy_network_permit(
         "api_news_rag",
         crate::news_rag::api_news_rag_impl(app.clone(), payload),

@@ -2051,7 +2051,7 @@ fn import_research_documents(
         staging.connection()?.execute(
             "INSERT OR REPLACE INTO research_metadata(key,value) VALUES('legacy_v1_import_complete','true')", []
         ).map_err(|error| ce(error.to_string()))?;
-        staging.rebuild_fts().map(|_| ()).map_err(String::from)
+        staging.rebuild_fts().map(|_| ()).map_err(|error| ce(error))
     })?;
     Ok(json!({
         "schema_version": RESEARCH_PACK_SCHEMA_VERSION,
@@ -2185,7 +2185,7 @@ fn rollback_research_documents(research_dir: &Path) -> Result<Value, CommandErro
         let staging = ResearchStore::open(staging_path)?;
         // Discard every old user row before copying CURRENT authority, including deletions.
         preserve_local_research_state(&research_dir.join("research.sqlite"), &staging)?;
-        staging.rebuild_fts().map(|_| ()).map_err(String::from)
+        staging.rebuild_fts().map(|_| ()).map_err(|error| ce(error))
     })?;
     Ok(
         json!({"rolled_back":true, "replaced_database":recovery::rollback_source(research_dir)?.display().to_string()}),
@@ -5580,7 +5580,7 @@ pub(crate) async fn api_research_query(
             },
             Ok(None) => {}
             Err(error) => {
-                response["model_warning"] = Value::String(error);
+                response["model_warning"] = Value::String(error.to_string());
             }
         }
     }

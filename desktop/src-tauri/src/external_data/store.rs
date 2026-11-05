@@ -1,4 +1,5 @@
 use super::{DataDomain, Market, RecordMetadata, RefreshRequest, StoredRecord};
+use crate::error::{codes, CommandError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -104,6 +105,11 @@ CREATE TABLE legacy_imports (
 );
 ";
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::EXTERNAL_STORE_INTERNAL, message.to_string())
+}
+
 pub(crate) struct DataStore {
     connection: Connection,
     path: PathBuf,
@@ -181,24 +187,24 @@ pub(crate) struct LegacyImportStatus {
 static REFRESH_RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl DataStore {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, CommandError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .map_err(|error| format!("create external data directory: {error}"))?;
+                .map_err(|error| ce(format!("create external data directory: {error}")))?;
         }
         if path.exists() {
             crate::durability::validate_sqlite_header(&path)?;
         }
 
         let mut connection = Connection::open(&path)
-            .map_err(|error| format!("open external data database: {error}"))?;
+            .map_err(|error| ce(format!("open external data database: {error}")))?;
         let version = pragma_i64(&connection, "user_version")?;
         let application_id = pragma_i64(&connection, "application_id")?;
         if version > SCHEMA_VERSION {
-            return Err(format!(
+            return Err(ce(format!(
                 "external data schema version {version} is newer than supported version {SCHEMA_VERSION}; database preserved"
-            ));
+            )));
         }
         if version < 0 {
             return Err("external data schema version is invalid; database preserved".into());
@@ -216,7 +222,7 @@ impl DataStore {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|error| format!("inspect external data database: {error}"))?;
+                .map_err(|error| ce(format!("inspect external data database: {error}")))?;
             if has_tables {
                 return Err(
                     "unversioned database is not an empty external data store; database preserved"
@@ -226,33 +232,33 @@ impl DataStore {
         }
 
         crate::durability::configure_user_connection(&connection)
-            .map_err(|error| format!("configure external data database: {error}"))?;
+            .map_err(|error| ce(format!("configure external data database: {error}")))?;
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
-            .map_err(|error| format!("configure external data lock timeout: {error}"))?;
+            .map_err(|error| ce(format!("configure external data lock timeout: {error}")))?;
 
         if version == 0 {
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|error| format!("begin external data schema creation: {error}"))?;
+                .map_err(|error| ce(format!("begin external data schema creation: {error}")))?;
             transaction
                 .execute_batch(SCHEMA_V1)
-                .map_err(|error| format!("create external data schema: {error}"))?;
+                .map_err(|error| ce(format!("create external data schema: {error}")))?;
             transaction
                 .pragma_update(None, "application_id", APPLICATION_ID)
-                .map_err(|error| format!("set external data application id: {error}"))?;
+                .map_err(|error| ce(format!("set external data application id: {error}")))?;
             transaction
                 .pragma_update(None, "user_version", SCHEMA_VERSION)
-                .map_err(|error| format!("set external data schema version: {error}"))?;
+                .map_err(|error| ce(format!("set external data schema version: {error}")))?;
             transaction
                 .commit()
-                .map_err(|error| format!("commit external data schema: {error}"))?;
+                .map_err(|error| ce(format!("commit external data schema: {error}")))?;
         }
 
         Ok(Self { connection, path })
     }
 
-    pub(crate) fn upsert_batch(&mut self, records: &[StoredRecord]) -> Result<usize, String> {
+    pub(crate) fn upsert_batch(&mut self, records: &[StoredRecord]) -> Result<usize, CommandError> {
         if records.is_empty() {
             return Ok(0);
         }
@@ -265,7 +271,7 @@ impl DataStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin external data batch: {error}"))?;
+            .map_err(|error| ce(format!("begin external data batch: {error}")))?;
         for row in &prepared {
             transaction
                 .execute(
@@ -304,11 +310,11 @@ impl DataStore {
                         now_ms(),
                     ],
                 )
-                .map_err(|error| format!("write external data record: {error}"))?;
+                .map_err(|error| ce(format!("write external data record: {error}")))?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("commit external data batch: {error}"))?;
+            .map_err(|error| ce(format!("commit external data batch: {error}")))?;
         Ok(prepared.len())
     }
 
@@ -317,7 +323,7 @@ impl DataStore {
         domain: DataDomain,
         market: Market,
         records: &[StoredRecord],
-    ) -> Result<usize, String> {
+    ) -> Result<usize, CommandError> {
         if records
             .iter()
             .any(|record| record.domain != domain || record.market != market)
@@ -331,13 +337,13 @@ impl DataStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin external domain replacement: {error}"))?;
+            .map_err(|error| ce(format!("begin external domain replacement: {error}")))?;
         transaction
             .execute(
                 "DELETE FROM records WHERE domain=?1 AND market=?2",
                 params![domain.as_str(), market.as_str()],
             )
-            .map_err(|error| format!("replace external domain records: {error}"))?;
+            .map_err(|error| ce(format!("replace external domain records: {error}")))?;
         for row in &prepared {
             transaction
                 .execute(
@@ -364,11 +370,11 @@ impl DataStore {
                         now_ms(),
                     ],
                 )
-                .map_err(|error| format!("write replacement external record: {error}"))?;
+                .map_err(|error| ce(format!("write replacement external record: {error}")))?;
         }
         transaction
             .commit()
-            .map_err(|error| format!("commit external domain replacement: {error}"))?;
+            .map_err(|error| ce(format!("commit external domain replacement: {error}")))?;
         Ok(prepared.len())
     }
 
@@ -376,14 +382,14 @@ impl DataStore {
         &mut self,
         domain: DataDomain,
         market: Market,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, CommandError> {
         let changed = self
             .connection
             .execute(
                 "DELETE FROM records WHERE domain=?1 AND market=?2",
                 params![domain.as_str(), market.as_str()],
             )
-            .map_err(|error| format!("clear external data domain: {error}"))?;
+            .map_err(|error| ce(format!("clear external data domain: {error}")))?;
         Ok(changed as u64)
     }
 
@@ -392,7 +398,7 @@ impl DataStore {
         domain: DataDomain,
         market: Market,
         entity_key: &str,
-    ) -> Result<Vec<StoredRecord>, String> {
+    ) -> Result<Vec<StoredRecord>, CommandError> {
         let mut statement = self
             .connection
             .prepare(
@@ -403,7 +409,7 @@ impl DataStore {
                  WHERE domain=?1 AND market=?2 AND entity_key=?3
                  ORDER BY record_key, source_id",
             )
-            .map_err(|error| format!("prepare external data read: {error}"))?;
+            .map_err(|error| ce(format!("prepare external data read: {error}")))?;
         let rows = statement
             .query_map(
                 params![domain.as_str(), market.as_str(), entity_key],
@@ -423,9 +429,9 @@ impl DataStore {
                     ))
                 },
             )
-            .map_err(|error| format!("query external data records: {error}"))?
+            .map_err(|error| ce(format!("query external data records: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read external data records: {error}"))?;
+            .map_err(|error| ce(format!("read external data records: {error}")))?;
 
         rows.into_iter()
             .map(
@@ -442,10 +448,11 @@ impl DataStore {
                     payload_json,
                     payload_hash,
                 )| {
-                    let quality_flags = serde_json::from_str(&quality_json)
-                        .map_err(|error| format!("decode external data quality flags: {error}"))?;
+                    let quality_flags = serde_json::from_str(&quality_json).map_err(|error| {
+                        ce(format!("decode external data quality flags: {error}"))
+                    })?;
                     let payload = serde_json::from_str(&payload_json)
-                        .map_err(|error| format!("decode external data payload: {error}"))?;
+                        .map_err(|error| ce(format!("decode external data payload: {error}")))?;
                     Ok(StoredRecord {
                         domain,
                         market,
@@ -475,7 +482,7 @@ impl DataStore {
         domain: DataDomain,
         market: Market,
         at: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         self.connection
             .execute(
                 "INSERT INTO source_state(source_id, domain, market, last_attempt_at, attempt_count)
@@ -485,7 +492,7 @@ impl DataStore {
                     attempt_count=source_state.attempt_count + 1",
                 params![source_id, domain.as_str(), market.as_str(), at],
             )
-            .map_err(|error| format!("record external source attempt: {error}"))?;
+            .map_err(|error| ce(format!("record external source attempt: {error}")))?;
         Ok(())
     }
 
@@ -493,7 +500,7 @@ impl DataStore {
         &self,
         domain: DataDomain,
         market: Market,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CommandError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM source_state
@@ -501,7 +508,7 @@ impl DataStore {
                 params![domain.as_str(), market.as_str()],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("read external domain activation state: {error}"))
+            .map_err(|error| ce(format!("read external domain activation state: {error}")))
     }
 
     pub(crate) fn record_source_success(
@@ -511,7 +518,7 @@ impl DataStore {
         market: Market,
         at: &str,
         record_count: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         self.connection
             .execute(
                 "INSERT INTO source_state(
@@ -532,7 +539,7 @@ impl DataStore {
                     record_count.min(i64::MAX as usize) as i64,
                 ],
             )
-            .map_err(|error| format!("record external source success: {error}"))?;
+            .map_err(|error| ce(format!("record external source success: {error}")))?;
         Ok(())
     }
 
@@ -544,7 +551,7 @@ impl DataStore {
         at: &str,
         category: &str,
         error: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let error_end = error
             .char_indices()
             .take_while(|(index, character)| index + character.len_utf8() <= MAX_ERROR_BYTES)
@@ -571,7 +578,7 @@ impl DataStore {
                     error
                 ],
             )
-            .map_err(|error| format!("record external source failure: {error}"))?;
+            .map_err(|error| ce(format!("record external source failure: {error}")))?;
         Ok(())
     }
 
@@ -579,7 +586,7 @@ impl DataStore {
         &self,
         domain: DataDomain,
         market: Market,
-    ) -> Result<Vec<SourceStatus>, String> {
+    ) -> Result<Vec<SourceStatus>, CommandError> {
         let mut statement = self
             .connection
             .prepare(
@@ -589,7 +596,7 @@ impl DataStore {
                  WHERE domain=?1 AND market=?2
                  ORDER BY source_id",
             )
-            .map_err(|error| format!("prepare external source status read: {error}"))?;
+            .map_err(|error| ce(format!("prepare external source status read: {error}")))?;
         let rows = statement
             .query_map(params![domain.as_str(), market.as_str()], |row| {
                 Ok(SourceStatus {
@@ -604,9 +611,9 @@ impl DataStore {
                     record_count: row.get::<_, i64>(8)?.max(0) as u64,
                 })
             })
-            .map_err(|error| format!("query external source status: {error}"))?;
+            .map_err(|error| ce(format!("query external source status: {error}")))?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read external source status: {error}"))
+            .map_err(|error| ce(format!("read external source status: {error}")))
     }
 
     pub(crate) fn create_refresh_run(
@@ -614,10 +621,10 @@ impl DataStore {
         request: &RefreshRequest,
         idempotency_key: &str,
         now: i64,
-    ) -> Result<(RefreshRunStatus, bool), String> {
+    ) -> Result<(RefreshRunStatus, bool), CommandError> {
         validate_idempotency_key(idempotency_key)?;
         let scope_json = serde_json::to_string(request)
-            .map_err(|error| format!("encode external refresh scope: {error}"))?;
+            .map_err(|error| ce(format!("encode external refresh scope: {error}")))?;
         if scope_json.len() > MAX_RECORD_BYTES {
             return Err("external refresh scope is too large".into());
         }
@@ -630,7 +637,7 @@ impl DataStore {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
-            .map_err(|error| format!("read external refresh idempotency key: {error}"))?
+            .map_err(|error| ce(format!("read external refresh idempotency key: {error}")))?
         {
             if existing.1 != scope_json {
                 return Err("idempotency key is already bound to a different refresh scope".into());
@@ -650,7 +657,7 @@ impl DataStore {
                  ) VALUES(?1, ?2, ?3, 'explicit', 'queued', ?4, ?4)",
                 params![run_id, idempotency_key, scope_json, now],
             )
-            .map_err(|error| format!("create external refresh run: {error}"))?;
+            .map_err(|error| ce(format!("create external refresh run: {error}")))?;
         let status = self
             .refresh_run_status(&run_id)?
             .ok_or_else(|| "created external refresh run could not be read".to_string())?;
@@ -662,11 +669,11 @@ impl DataStore {
         run_id: &str,
         foreground_recovery: bool,
         now: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin external refresh run start: {error}"))?;
+            .map_err(|error| ce(format!("begin external refresh run start: {error}")))?;
         let changed = if foreground_recovery {
             transaction
                 .execute(
@@ -677,7 +684,7 @@ impl DataStore {
                        AND recovery_count=0",
                     params![run_id, now],
                 )
-                .map_err(|error| format!("start external foreground recovery: {error}"))?
+                .map_err(|error| ce(format!("start external foreground recovery: {error}")))?
         } else {
             transaction
                 .execute(
@@ -689,14 +696,14 @@ impl DataStore {
                      )",
                     params![run_id, now],
                 )
-                .map_err(|error| format!("start external refresh run: {error}"))?
+                .map_err(|error| ce(format!("start external refresh run: {error}")))?
         };
         if changed != 1 {
             return Err("external refresh run cannot start from its current state".into());
         }
         transaction
             .commit()
-            .map_err(|error| format!("commit external refresh run start: {error}"))
+            .map_err(|error| ce(format!("commit external refresh run start: {error}")))
     }
 
     pub(crate) fn finish_refresh_run(
@@ -706,11 +713,11 @@ impl DataStore {
         now: i64,
         error_category: Option<&str>,
         error: Option<&str>,
-    ) -> Result<RefreshRunState, String> {
+    ) -> Result<RefreshRunState, CommandError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin external refresh run finish: {error}"))?;
+            .map_err(|error| ce(format!("begin external refresh run finish: {error}")))?;
         let current: Option<(String, i64)> = transaction
             .query_row(
                 "SELECT state, recovery_count FROM refresh_runs WHERE run_id=?1",
@@ -718,7 +725,7 @@ impl DataStore {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
-            .map_err(|error| format!("read external refresh run before finish: {error}"))?;
+            .map_err(|error| ce(format!("read external refresh run before finish: {error}")))?;
         let Some((current_state, recovery_count)) = current else {
             return Err("external refresh run was not found".into());
         };
@@ -738,14 +745,14 @@ impl DataStore {
                     last_error_category=?4, last_error=?5 WHERE run_id=?1",
                 params![run_id, final_state.as_str(), now, category, error],
             )
-            .map_err(|error| format!("finish external refresh run: {error}"))?;
+            .map_err(|error| ce(format!("finish external refresh run: {error}")))?;
         transaction
             .commit()
-            .map_err(|error| format!("commit external refresh run finish: {error}"))?;
+            .map_err(|error| ce(format!("commit external refresh run finish: {error}")))?;
         Ok(final_state)
     }
 
-    pub(crate) fn foreground_recoveries(&self) -> Result<Vec<RefreshRunStatus>, String> {
+    pub(crate) fn foreground_recoveries(&self) -> Result<Vec<RefreshRunStatus>, CommandError> {
         let run_ids = {
             let mut statement = self
                 .connection
@@ -754,18 +761,22 @@ impl DataStore {
                      WHERE state='retryable' AND origin='explicit' AND recovery_count=0
                      ORDER BY updated_at_ms, run_id LIMIT 64",
                 )
-                .map_err(|error| format!("prepare external foreground recovery query: {error}"))?;
+                .map_err(|error| {
+                    ce(format!(
+                        "prepare external foreground recovery query: {error}"
+                    ))
+                })?;
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|error| format!("query external foreground recovery runs: {error}"))?;
+                .map_err(|error| ce(format!("query external foreground recovery runs: {error}")))?;
             rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("read external foreground recovery runs: {error}"))?
+                .map_err(|error| ce(format!("read external foreground recovery runs: {error}")))?
         };
         run_ids
             .iter()
             .map(|run_id| {
                 self.refresh_run_status(run_id)?
-                    .ok_or_else(|| "external recovery run disappeared".to_string())
+                    .ok_or_else(|| ce("external recovery run disappeared"))
             })
             .collect()
     }
@@ -773,7 +784,7 @@ impl DataStore {
     pub(crate) fn refresh_run_status(
         &self,
         run_id: &str,
-    ) -> Result<Option<RefreshRunStatus>, String> {
+    ) -> Result<Option<RefreshRunStatus>, CommandError> {
         let row: Option<(
             String,
             String,
@@ -811,7 +822,7 @@ impl DataStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("read external refresh run status: {error}"))?;
+            .map_err(|error| ce(format!("read external refresh run status: {error}")))?;
         row.map(
             |(
                 run_id,
@@ -827,7 +838,7 @@ impl DataStore {
                 last_error,
             )| {
                 let request = serde_json::from_str(&request_json)
-                    .map_err(|error| format!("decode external refresh scope: {error}"))?;
+                    .map_err(|error| ce(format!("decode external refresh scope: {error}")))?;
                 let state = parse_refresh_run_state(&state)?;
                 Ok(RefreshRunStatus {
                     run_id,
@@ -850,7 +861,7 @@ impl DataStore {
     pub(crate) fn refresh_run_by_idempotency_key(
         &self,
         key: &str,
-    ) -> Result<Option<RefreshRunStatus>, String> {
+    ) -> Result<Option<RefreshRunStatus>, CommandError> {
         let run_id = self
             .connection
             .query_row(
@@ -859,7 +870,11 @@ impl DataStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()
-            .map_err(|error| format!("find external refresh run by idempotency key: {error}"))?;
+            .map_err(|error| {
+                ce(format!(
+                    "find external refresh run by idempotency key: {error}"
+                ))
+            })?;
         run_id
             .map(|id| self.refresh_run_status(&id))
             .transpose()
@@ -870,7 +885,7 @@ impl DataStore {
         &self,
         domain: DataDomain,
         market: Market,
-    ) -> Result<Vec<StoredRecord>, String> {
+    ) -> Result<Vec<StoredRecord>, CommandError> {
         let mut statement = self
             .connection
             .prepare(
@@ -880,7 +895,7 @@ impl DataStore {
                  FROM records WHERE domain=?1 AND market=?2
                  ORDER BY entity_key, record_key, source_id",
             )
-            .map_err(|error| format!("prepare external domain read: {error}"))?;
+            .map_err(|error| ce(format!("prepare external domain read: {error}")))?;
         let rows = statement
             .query_map(params![domain.as_str(), market.as_str()], |row| {
                 Ok((
@@ -898,9 +913,9 @@ impl DataStore {
                     row.get::<_, String>(11)?,
                 ))
             })
-            .map_err(|error| format!("query external domain records: {error}"))?
+            .map_err(|error| ce(format!("query external domain records: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read external domain records: {error}"))?;
+            .map_err(|error| ce(format!("read external domain records: {error}")))?;
 
         rows.into_iter()
             .map(
@@ -918,10 +933,11 @@ impl DataStore {
                     payload_json,
                     payload_hash,
                 )| {
-                    let quality_flags = serde_json::from_str(&quality_json)
-                        .map_err(|error| format!("decode external data quality flags: {error}"))?;
+                    let quality_flags = serde_json::from_str(&quality_json).map_err(|error| {
+                        ce(format!("decode external data quality flags: {error}"))
+                    })?;
                     let payload = serde_json::from_str(&payload_json)
-                        .map_err(|error| format!("decode external data payload: {error}"))?;
+                        .map_err(|error| ce(format!("decode external data payload: {error}")))?;
                     Ok(StoredRecord {
                         domain,
                         market,
@@ -956,7 +972,7 @@ impl DataStore {
         validation_state: &str,
         promoted: bool,
         error: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let source_path = truncate_utf8(source_path, MAX_KEY_BYTES);
         let error = error.map(|value| truncate_utf8(value, MAX_ERROR_BYTES));
         self.connection
@@ -985,7 +1001,7 @@ impl DataStore {
                     error,
                 ],
             )
-            .map_err(|error| format!("record legacy external data import: {error}"))?;
+            .map_err(|error| ce(format!("record legacy external data import: {error}")))?;
         Ok(())
     }
 
@@ -995,7 +1011,7 @@ impl DataStore {
         market: Market,
         source_path: &str,
         checksum: &str,
-    ) -> Result<Option<LegacyImportStatus>, String> {
+    ) -> Result<Option<LegacyImportStatus>, CommandError> {
         self.connection
             .query_row(
                 "SELECT domain, market, source_path, checksum_sha256, parsed_count,
@@ -1018,7 +1034,7 @@ impl DataStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("read legacy external data import status: {error}"))
+            .map_err(|error| ce(format!("read legacy external data import status: {error}")))
     }
 
     pub(crate) fn latest_promoted_legacy_import(
@@ -1026,7 +1042,7 @@ impl DataStore {
         domain: DataDomain,
         market: Market,
         source_path: &str,
-    ) -> Result<Option<LegacyImportStatus>, String> {
+    ) -> Result<Option<LegacyImportStatus>, CommandError> {
         self.connection
             .query_row(
                 "SELECT domain, market, source_path, checksum_sha256, parsed_count,
@@ -1050,12 +1066,16 @@ impl DataStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("read promoted legacy external data import: {error}"))
+            .map_err(|error| {
+                ce(format!(
+                    "read promoted legacy external data import: {error}"
+                ))
+            })
     }
 
-    pub(crate) fn store_bytes(&self) -> Result<u64, String> {
+    pub(crate) fn store_bytes(&self) -> Result<u64, CommandError> {
         let mut bytes = fs::metadata(&self.path)
-            .map_err(|error| format!("inspect external data database size: {error}"))?
+            .map_err(|error| ce(format!("inspect external data database size: {error}")))?
             .len();
         for suffix in ["-wal", "-shm"] {
             let sidecar = PathBuf::from(format!("{}{suffix}", self.path.to_string_lossy()));
@@ -1066,11 +1086,11 @@ impl DataStore {
         Ok(bytes)
     }
 
-    pub(crate) fn status_json(&self) -> Result<Value, String> {
+    pub(crate) fn status_json(&self) -> Result<Value, CommandError> {
         let record_count: i64 = self
             .connection
             .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
-            .map_err(|error| format!("count external data records: {error}"))?;
+            .map_err(|error| ce(format!("count external data records: {error}")))?;
         let sources = self
             .connection
             .prepare(
@@ -1084,7 +1104,7 @@ impl DataStore {
                          WHERE records_max.domain=state.domain AND records_max.market=state.market AND records_max.source_id=state.source_id)
                  FROM source_state AS state ORDER BY state.domain, state.market, state.source_id",
             )
-            .map_err(|error| format!("prepare external source status: {error}"))?
+            .map_err(|error| ce(format!("prepare external source status: {error}")))?
             .query_map([], |row| {
                 Ok(json!({
                     "source_id": row.get::<_, String>(0)?,
@@ -1100,9 +1120,9 @@ impl DataStore {
                     "observed_through": row.get::<_, Option<String>>(10)?,
                 }))
             })
-            .map_err(|error| format!("query external source status: {error}"))?
+            .map_err(|error| ce(format!("query external source status: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read external source status: {error}"))?;
+            .map_err(|error| ce(format!("read external source status: {error}")))?;
         let migrations = self
             .connection
             .prepare(
@@ -1116,7 +1136,7 @@ impl DataStore {
                  GROUP BY domain, market
                  ORDER BY domain, market",
             )
-            .map_err(|error| format!("prepare external migration status: {error}"))?
+            .map_err(|error| ce(format!("prepare external migration status: {error}")))?
             .query_map([], |row| {
                 Ok(json!({
                     "domain": row.get::<_, String>(0)?,
@@ -1128,9 +1148,9 @@ impl DataStore {
                     "checked_at_ms": row.get::<_, i64>(6)?,
                 }))
             })
-            .map_err(|error| format!("query external migration status: {error}"))?
+            .map_err(|error| ce(format!("query external migration status: {error}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read external migration status: {error}"))?;
+            .map_err(|error| ce(format!("read external migration status: {error}")))?;
         let pending_retries: i64 = self
             .connection
             .query_row(
@@ -1138,7 +1158,7 @@ impl DataStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("count external refresh retries: {error}"))?;
+            .map_err(|error| ce(format!("count external refresh retries: {error}")))?;
         let needs_user_retry: i64 = self
             .connection
             .query_row(
@@ -1146,7 +1166,7 @@ impl DataStore {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|error| format!("count external user retries: {error}"))?;
+            .map_err(|error| ce(format!("count external user retries: {error}")))?;
         let bytes = self.store_bytes()?;
         const WARNING_BYTES: u64 = 200 * 1024 * 1024;
         Ok(json!({
@@ -1168,7 +1188,7 @@ impl DataStore {
         &self,
         domains: &[DataDomain],
         cutoff: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         cleanup_preview_connection(&self.connection, domains, cutoff)
     }
 
@@ -1177,11 +1197,11 @@ impl DataStore {
         domains: &[DataDomain],
         cutoff: Option<&str>,
         preview_token: &str,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, CommandError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| format!("begin external data cleanup: {error}"))?;
+            .map_err(|error| ce(format!("begin external data cleanup: {error}")))?;
         let preview = cleanup_preview_connection(&transaction, domains, cutoff)?;
         let expected = preview["preview_token"]
             .as_str()
@@ -1196,21 +1216,21 @@ impl DataStore {
             );
             let changed = transaction
                 .execute(&delete_sql, params![domain.as_str(), cutoff])
-                .map_err(|error| format!("delete external data records: {error}"))?;
+                .map_err(|error| ce(format!("delete external data records: {error}")))?;
             removed = removed.saturating_add(changed as u64);
         }
         transaction
             .commit()
-            .map_err(|error| format!("commit external data cleanup: {error}"))?;
+            .map_err(|error| ce(format!("commit external data cleanup: {error}")))?;
         Ok(removed)
     }
 
-    pub(crate) fn checkpoint(&self) -> Result<(), String> {
+    pub(crate) fn checkpoint(&self) -> Result<(), CommandError> {
         crate::durability::checkpoint(&self.connection)
     }
 }
 
-fn validate_idempotency_key(value: &str) -> Result<(), String> {
+fn validate_idempotency_key(value: &str) -> Result<(), CommandError> {
     if value.trim().is_empty()
         || value.len() > MAX_KEY_BYTES
         || !value
@@ -1230,7 +1250,7 @@ fn next_refresh_run_id(now: i64) -> String {
     )
 }
 
-fn parse_refresh_run_state(value: &str) -> Result<RefreshRunState, String> {
+fn parse_refresh_run_state(value: &str) -> Result<RefreshRunState, CommandError> {
     match value {
         "queued" => Ok(RefreshRunState::Queued),
         "running" => Ok(RefreshRunState::Running),
@@ -1240,7 +1260,7 @@ fn parse_refresh_run_state(value: &str) -> Result<RefreshRunState, String> {
         "needs_user_retry" => Ok(RefreshRunState::NeedsUserRetry),
         "failed" => Ok(RefreshRunState::Failed),
         "cancelled" => Ok(RefreshRunState::Cancelled),
-        other => Err(format!("unknown external refresh state: {other}")),
+        other => Err(ce(format!("unknown external refresh state: {other}"))),
     }
 }
 
@@ -1252,7 +1272,7 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
-fn validate_cutoff(cutoff: Option<&str>) -> Result<(), String> {
+fn validate_cutoff(cutoff: Option<&str>) -> Result<(), CommandError> {
     if let Some(cutoff) = cutoff {
         let digits = cutoff
             .chars()
@@ -1274,7 +1294,7 @@ fn cleanup_preview_connection(
     connection: &Connection,
     domains: &[DataDomain],
     cutoff: Option<&str>,
-) -> Result<Value, String> {
+) -> Result<Value, CommandError> {
     if domains.is_empty() {
         return Err("select at least one external data domain".into());
     }
@@ -1301,7 +1321,7 @@ fn cleanup_preview_connection(
             .query_row(&count_sql, params![domain.as_str(), cutoff], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
-            .map_err(|error| format!("preview external data cleanup: {error}"))?;
+            .map_err(|error| ce(format!("preview external data cleanup: {error}")))?;
         let records = records.max(0) as u64;
         let bytes = bytes.max(0) as u64;
         total_records = total_records.saturating_add(records);
@@ -1313,7 +1333,7 @@ fn cleanup_preview_connection(
         );
         let mut statement = connection
             .prepare(&fingerprint_sql)
-            .map_err(|error| format!("prepare external cleanup fingerprint: {error}"))?;
+            .map_err(|error| ce(format!("prepare external cleanup fingerprint: {error}")))?;
         let rows = statement
             .query_map(params![domain.as_str(), cutoff], |row| {
                 Ok((
@@ -1324,10 +1344,10 @@ fn cleanup_preview_connection(
                     row.get::<_, String>(4)?,
                 ))
             })
-            .map_err(|error| format!("query external cleanup fingerprint: {error}"))?;
+            .map_err(|error| ce(format!("query external cleanup fingerprint: {error}")))?;
         for row in rows {
             let (market, entity, record, source, hash) =
-                row.map_err(|error| format!("read external cleanup fingerprint: {error}"))?;
+                row.map_err(|error| ce(format!("read external cleanup fingerprint: {error}")))?;
             for item in [market, entity, record, source, hash] {
                 fingerprint.update(item.as_bytes());
                 fingerprint.update([0]);
@@ -1372,7 +1392,7 @@ struct PreparedRecord<'a> {
     payload_hash: String,
 }
 
-fn prepare_record(record: &StoredRecord) -> Result<PreparedRecord<'_>, String> {
+fn prepare_record(record: &StoredRecord) -> Result<PreparedRecord<'_>, CommandError> {
     for (label, value, max_bytes) in [
         ("entity_key", record.entity_key.as_str(), MAX_KEY_BYTES),
         ("record_key", record.record_key.as_str(), MAX_KEY_BYTES),
@@ -1383,10 +1403,12 @@ fn prepare_record(record: &StoredRecord) -> Result<PreparedRecord<'_>, String> {
         ),
     ] {
         if value.trim().is_empty() {
-            return Err(format!("external record {label} must not be empty"));
+            return Err(ce(format!("external record {label} must not be empty")));
         }
         if value.len() > max_bytes {
-            return Err(format!("external record {label} exceeds {max_bytes} bytes"));
+            return Err(ce(format!(
+                "external record {label} exceeds {max_bytes} bytes"
+            )));
         }
     }
     if record.metadata.schema_version == 0 {
@@ -1396,17 +1418,17 @@ fn prepare_record(record: &StoredRecord) -> Result<PreparedRecord<'_>, String> {
         return Err("external record contains a non-finite numeric value".into());
     }
     let payload_bytes = serde_json::to_vec(&record.payload)
-        .map_err(|error| format!("encode external record payload: {error}"))?;
+        .map_err(|error| ce(format!("encode external record payload: {error}")))?;
     if payload_bytes.len() > MAX_RECORD_BYTES {
-        return Err(format!(
+        return Err(ce(format!(
             "external record exceeds the {MAX_RECORD_BYTES}-byte payload limit"
-        ));
+        )));
     }
     let quality_json = serde_json::to_string(&record.metadata.quality_flags)
-        .map_err(|error| format!("encode external record quality flags: {error}"))?;
+        .map_err(|error| ce(format!("encode external record quality flags: {error}")))?;
     let payload_hash = sha256_hex(&payload_bytes);
     let payload_json = String::from_utf8(payload_bytes)
-        .map_err(|error| format!("encode external record payload as UTF-8: {error}"))?;
+        .map_err(|error| ce(format!("encode external record payload as UTF-8: {error}")))?;
 
     Ok(PreparedRecord {
         domain: record.domain.as_str(),
@@ -1442,10 +1464,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn pragma_i64(connection: &Connection, name: &str) -> Result<i64, String> {
+fn pragma_i64(connection: &Connection, name: &str) -> Result<i64, CommandError> {
     connection
         .pragma_query_value(None, name, |row| row.get(0))
-        .map_err(|error| format!("read external data {name}: {error}"))
+        .map_err(|error| ce(format!("read external data {name}: {error}")))
 }
 
 fn now_ms() -> i64 {

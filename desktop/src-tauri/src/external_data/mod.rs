@@ -172,7 +172,7 @@ pub(crate) fn open_app_store(app: &tauri::AppHandle) -> Result<DataStore, String
         .path()
         .app_data_dir()
         .map_err(|error| format!("failed to resolve external data directory: {error}"))?;
-    DataStore::open(store_path(&root))
+    DataStore::open(store_path(&root)).map_err(String::from)
 }
 
 #[tauri::command]
@@ -216,7 +216,9 @@ pub(crate) fn api_data_cleanup_preview(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    open_app_store(&app)?.cleanup_preview(&domains, cutoff)
+    open_app_store(&app)?
+        .cleanup_preview(&domains, cutoff)
+        .map_err(String::from)
 }
 
 #[tauri::command]

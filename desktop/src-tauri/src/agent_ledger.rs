@@ -1,3 +1,4 @@
+use crate::error::{codes, CommandError};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
@@ -18,18 +19,23 @@ const MAX_AGENT_METRICS_ROWS: usize = 2_000;
 pub(crate) const MAX_AGENT_LEDGER_ID_BYTES: usize = 256;
 const AGENT_CONVERSATION_DELETED_ERROR: &str = "agent conversation was deleted";
 
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::AGENT_LEDGER_INTERNAL, message.to_string())
+}
+
 pub(crate) struct AgentRunStore {
     connection: Connection,
 }
 
-pub(crate) fn with_app_store<T, F>(app: &tauri::AppHandle, operation: F) -> Result<T, String>
+pub(crate) fn with_app_store<T, F>(app: &tauri::AppHandle, operation: F) -> Result<T, CommandError>
 where
-    F: FnOnce(&AgentRunStore) -> Result<T, String>,
+    F: FnOnce(&AgentRunStore) -> Result<T, CommandError>,
 {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve agent ledger directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve agent ledger directory: {error}")))?;
     root.push("agent");
     root.push("agent-runs.sqlite");
     let store = AgentRunStore::open(root)?;
@@ -59,20 +65,28 @@ pub(crate) fn next_run_id() -> String {
 }
 
 impl AgentRunStore {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, CommandError> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create agent ledger directory: {error}"))?;
+            fs::create_dir_all(parent).map_err(|error| {
+                CommandError::new(
+                    codes::AGENT_LEDGER_IO,
+                    format!("failed to create agent ledger directory: {error}"),
+                )
+            })?;
         }
         if path.exists() {
             crate::durability::validate_sqlite_header(path)?;
         }
-        let mut connection = Connection::open(path)
-            .map_err(|error| format!("failed to open agent ledger: {error}"))?;
+        let mut connection = Connection::open(path).map_err(|error| {
+            CommandError::new(
+                codes::AGENT_LEDGER_SQLITE,
+                format!("failed to open agent ledger: {error}"),
+            )
+        })?;
         connection
             .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| format!("failed to configure agent ledger: {error}"))?;
+            .map_err(|error| ce(format!("failed to configure agent ledger: {error}")))?;
         ensure_supported_agent_ledger_schema(agent_ledger_schema_version(&connection)?)?;
         crate::durability::backup_before_migration(
             &connection,
@@ -90,7 +104,7 @@ impl AgentRunStore {
         &self,
         payload: &Value,
         started_at_epoch_ms: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let run_id = required_string(payload, "run_id")?;
         let question = crate::agent_harness::redact_persisted_question(
             &required_string(payload, "message")?,
@@ -98,16 +112,18 @@ impl AgentRunStore {
         );
         let conversation_id = required_string(payload, "conversation_id")?;
         if run_id.len() > MAX_AGENT_LEDGER_ID_BYTES {
-            return Err(format!("run_id exceeds {MAX_AGENT_LEDGER_ID_BYTES} bytes"));
+            return Err(ce(format!(
+                "run_id exceeds {MAX_AGENT_LEDGER_ID_BYTES} bytes"
+            )));
         }
         if conversation_id.len() > MAX_AGENT_LEDGER_ID_BYTES {
-            return Err(format!(
+            return Err(ce(format!(
                 "conversation_id exceeds {MAX_AGENT_LEDGER_ID_BYTES} bytes"
-            ));
+            )));
         }
         let mode = optional_string(payload, "mode").unwrap_or_else(|| "quick".to_string());
         let request_json = serde_json::to_string(&sanitized_request(payload))
-            .map_err(|error| format!("failed to encode agent request: {error}"))?;
+            .map_err(|error| ce(format!("failed to encode agent request: {error}")))?;
         let changed = self
             .connection
             .execute(
@@ -128,11 +144,11 @@ impl AgentRunStore {
                     request_json
                 ],
             )
-            .map_err(|error| format!("failed to start agent run: {error}"))?;
+            .map_err(|error| ce(format!("failed to start agent run: {error}")))?;
         if changed == 0 {
-            return Err(format!(
+            return Err(ce(format!(
                 "{AGENT_CONVERSATION_DELETED_ERROR}: {conversation_id}"
-            ));
+            )));
         }
         Ok(())
     }
@@ -143,11 +159,11 @@ impl AgentRunStore {
         events: &[Value],
         result: &Value,
         completed_at_epoch_ms: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let events_json = serde_json::to_string(events)
-            .map_err(|error| format!("failed to encode agent events: {error}"))?;
+            .map_err(|error| ce(format!("failed to encode agent events: {error}")))?;
         let result_json = serde_json::to_string(result)
-            .map_err(|error| format!("failed to encode agent result: {error}"))?;
+            .map_err(|error| ce(format!("failed to encode agent result: {error}")))?;
         let changed = self
             .connection
             .execute(
@@ -158,7 +174,7 @@ impl AgentRunStore {
                  WHERE run_id = ?1",
                 params![run_id, completed_at_epoch_ms, events_json, result_json],
             )
-            .map_err(|error| format!("failed to complete agent run: {error}"))?;
+            .map_err(|error| ce(format!("failed to complete agent run: {error}")))?;
         ensure_run_updated(changed, run_id)
     }
 
@@ -168,9 +184,9 @@ impl AgentRunStore {
         events: &[Value],
         error: &str,
         completed_at_epoch_ms: i64,
-    ) -> Result<(), String> {
+    ) -> Result<(), CommandError> {
         let events_json = serde_json::to_string(events)
-            .map_err(|error| format!("failed to encode agent events: {error}"))?;
+            .map_err(|error| ce(format!("failed to encode agent events: {error}")))?;
         let changed = self
             .connection
             .execute(
@@ -181,7 +197,7 @@ impl AgentRunStore {
                  WHERE run_id = ?1",
                 params![run_id, completed_at_epoch_ms, events_json, error],
             )
-            .map_err(|error| format!("failed to record agent failure: {error}"))?;
+            .map_err(|error| ce(format!("failed to record agent failure: {error}")))?;
         ensure_run_updated(changed, run_id)
     }
 
@@ -189,7 +205,7 @@ impl AgentRunStore {
         &self,
         limit: usize,
         conversation_id: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let limit = limit.clamp(1, 200) as i64;
         let mut statement = self
             .connection
@@ -201,7 +217,7 @@ impl AgentRunStore {
                  ORDER BY started_at_epoch_ms DESC, run_id DESC
                  LIMIT ?2",
             )
-            .map_err(|error| format!("failed to prepare agent run list: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare agent run list: {error}")))?;
         let rows = statement
             .query_map(params![conversation_id, limit], |row| {
                 Ok(json!({
@@ -216,10 +232,12 @@ impl AgentRunStore {
                     "error": row.get::<_, Option<String>>(8)?,
                 }))
             })
-            .map_err(|error| format!("failed to query agent run list: {error}"))?;
-        rows.map(|row| row.map_err(|error| format!("failed to decode agent run summary: {error}")))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array)
+            .map_err(|error| ce(format!("failed to query agent run list: {error}")))?;
+        rows.map(|row| {
+            row.map_err(|error| ce(format!("failed to decode agent run summary: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
     }
 
     /// Returns bounded, aggregate-only run diagnostics. This intentionally reads only fields
@@ -228,7 +246,7 @@ impl AgentRunStore {
         &self,
         limit: usize,
         conversation_id: Option<&str>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, CommandError> {
         let limit = limit.clamp(1, MAX_AGENT_METRICS_ROWS) as i64;
         let mut statement = self
             .connection
@@ -239,7 +257,7 @@ impl AgentRunStore {
                  ORDER BY started_at_epoch_ms DESC, run_id DESC
                  LIMIT ?2",
             )
-            .map_err(|error| format!("failed to prepare agent metrics: {error}"))?;
+            .map_err(|error| ce(format!("failed to prepare agent metrics: {error}")))?;
         let rows = statement
             .query_map(params![conversation_id, limit], |row| {
                 Ok((
@@ -249,7 +267,7 @@ impl AgentRunStore {
                     row.get::<_, Option<String>>(3)?,
                 ))
             })
-            .map_err(|error| format!("failed to query agent metrics: {error}"))?;
+            .map_err(|error| ce(format!("failed to query agent metrics: {error}")))?;
 
         let mut status_counts = BTreeMap::<String, usize>::new();
         let mut profile_counts = BTreeMap::<String, MetricBucket>::new();
@@ -259,7 +277,7 @@ impl AgentRunStore {
         let mut sample_size = 0usize;
         for row in rows {
             let (mode, status, duration_ms, result_json) =
-                row.map_err(|error| format!("failed to read agent metrics: {error}"))?;
+                row.map_err(|error| ce(format!("failed to read agent metrics: {error}")))?;
             sample_size += 1;
             *status_counts.entry(status.clone()).or_default() += 1;
             if let Some(duration_ms) = duration_ms.filter(|value| *value >= 0) {
@@ -339,7 +357,7 @@ impl AgentRunStore {
         }))
     }
 
-    pub(crate) fn get_run(&self, run_id: &str) -> Result<Option<Value>, String> {
+    pub(crate) fn get_run(&self, run_id: &str) -> Result<Option<Value>, CommandError> {
         // `request_json` is deliberately not selected: the replay detail contract has no request
         // field, and schema v2 persists only a schema marker there.
         let stored = self
@@ -367,15 +385,19 @@ impl AgentRunStore {
                 },
             )
             .optional()
-            .map_err(|error| format!("failed to read agent run: {error}"))?;
+            .map_err(|error| ce(format!("failed to read agent run: {error}")))?;
         stored.map(decode_stored_run).transpose()
     }
 
-    pub(crate) fn delete_conversation_runs(&self, conversation_id: &str) -> Result<usize, String> {
-        let transaction = self
-            .connection
-            .unchecked_transaction()
-            .map_err(|error| format!("failed to start agent conversation deletion: {error}"))?;
+    pub(crate) fn delete_conversation_runs(
+        &self,
+        conversation_id: &str,
+    ) -> Result<usize, CommandError> {
+        let transaction = self.connection.unchecked_transaction().map_err(|error| {
+            ce(format!(
+                "failed to start agent conversation deletion: {error}"
+            ))
+        })?;
         transaction
             .execute(
                 "INSERT INTO agent_deleted_conversations (conversation_id, deleted_at_epoch_ms)
@@ -384,16 +406,18 @@ impl AgentRunStore {
                  SET deleted_at_epoch_ms = excluded.deleted_at_epoch_ms",
                 params![conversation_id, current_epoch_millis()],
             )
-            .map_err(|error| format!("failed to tombstone agent conversation: {error}"))?;
+            .map_err(|error| ce(format!("failed to tombstone agent conversation: {error}")))?;
         let deleted = transaction
             .execute(
                 "DELETE FROM agent_runs WHERE conversation_id = ?1",
                 params![conversation_id],
             )
-            .map_err(|error| format!("failed to delete agent conversation runs: {error}"))?;
-        transaction
-            .commit()
-            .map_err(|error| format!("failed to commit agent conversation deletion: {error}"))?;
+            .map_err(|error| ce(format!("failed to delete agent conversation runs: {error}")))?;
+        transaction.commit().map_err(|error| {
+            ce(format!(
+                "failed to commit agent conversation deletion: {error}"
+            ))
+        })?;
         Ok(deleted)
     }
 
@@ -401,7 +425,7 @@ impl AgentRunStore {
         &self,
         profile_id: &str,
         prompt_version: &str,
-    ) -> Result<Vec<PolicyRejectionSample>, String> {
+    ) -> Result<Vec<PolicyRejectionSample>, CommandError> {
         let mut statement = self
             .connection
             .prepare(
@@ -411,7 +435,7 @@ impl AgentRunStore {
                  ORDER BY completed_at_epoch_ms DESC, run_id DESC
                  LIMIT 2000",
             )
-            .map_err(|error| format!("failed to query policy rejections: {error}"))?;
+            .map_err(|error| ce(format!("failed to query policy rejections: {error}")))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -420,11 +444,11 @@ impl AgentRunStore {
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|error| format!("failed to read policy rejections: {error}"))?;
+            .map_err(|error| ce(format!("failed to read policy rejections: {error}")))?;
         let mut samples = Vec::new();
         for row in rows {
             let (run_id, question, result_json) =
-                row.map_err(|error| format!("failed to read policy rejection row: {error}"))?;
+                row.map_err(|error| ce(format!("failed to read policy rejection row: {error}")))?;
             let result: Value = serde_json::from_str(&result_json).unwrap_or(Value::Null);
             let harness = result.get("harness");
             if harness
@@ -503,7 +527,7 @@ struct StoredAgentRun {
     error: Option<String>,
 }
 
-fn initialize_schema(connection: &Connection) -> Result<(), String> {
+fn initialize_schema(connection: &Connection) -> Result<(), CommandError> {
     crate::durability::configure_user_connection(connection)?;
     connection
         .execute_batch(
@@ -532,7 +556,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation
                ON agent_runs(conversation_id, started_at_epoch_ms DESC);",
         )
-        .map_err(|error| format!("failed to initialize agent ledger: {error}"))
+        .map_err(|error| ce(format!("failed to initialize agent ledger: {error}")))
 }
 
 static RECONCILE_ONCE: Once = Once::new();
@@ -552,16 +576,20 @@ fn reconcile_interrupted_runs_once(connection: &Connection) {
     });
 }
 
-fn reconcile_interrupted_runs(connection: &Connection) -> Result<usize, String> {
+fn reconcile_interrupted_runs(connection: &Connection) -> Result<usize, CommandError> {
     connection
         .execute(
             "UPDATE agent_runs SET status = 'unknown' WHERE status = 'running'",
             [],
         )
-        .map_err(|error| format!("failed to reconcile interrupted agent runs: {error}"))
+        .map_err(|error| {
+            ce(format!(
+                "failed to reconcile interrupted agent runs: {error}"
+            ))
+        })
 }
 
-fn migrate_agent_ledger(connection: &mut Connection) -> Result<usize, String> {
+fn migrate_agent_ledger(connection: &mut Connection) -> Result<usize, CommandError> {
     let version = agent_ledger_schema_version(connection)?;
     ensure_supported_agent_ledger_schema(version)?;
     if version == AGENT_LEDGER_SCHEMA_VERSION {
@@ -570,13 +598,15 @@ fn migrate_agent_ledger(connection: &mut Connection) -> Result<usize, String> {
 
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("failed to start agent ledger migration: {error}"))?;
+        .map_err(|error| ce(format!("failed to start agent ledger migration: {error}")))?;
     let version = agent_ledger_schema_version(&transaction)?;
     ensure_supported_agent_ledger_schema(version)?;
     if version == AGENT_LEDGER_SCHEMA_VERSION {
-        transaction
-            .commit()
-            .map_err(|error| format!("failed to finish agent ledger migration check: {error}"))?;
+        transaction.commit().map_err(|error| {
+            ce(format!(
+                "failed to finish agent ledger migration check: {error}"
+            ))
+        })?;
         return Ok(0);
     }
 
@@ -588,7 +618,11 @@ fn migrate_agent_ledger(connection: &mut Connection) -> Result<usize, String> {
                  result_json = NULL, error = NULL",
             params![request_snapshot],
         )
-        .map_err(|error| format!("failed to scrub legacy agent replay payloads: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to scrub legacy agent replay payloads: {error}"
+            ))
+        })?;
     let removed = transaction
         .execute(
             "DELETE FROM agent_runs
@@ -598,27 +632,39 @@ fn migrate_agent_ledger(connection: &mut Connection) -> Result<usize, String> {
                 OR length(CAST(conversation_id AS BLOB)) > ?1",
             params![MAX_AGENT_LEDGER_ID_BYTES as i64],
         )
-        .map_err(|error| format!("failed to remove orphaned legacy agent runs: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to remove orphaned legacy agent runs: {error}"
+            ))
+        })?;
     transaction
         .pragma_update(None, "user_version", AGENT_LEDGER_SCHEMA_VERSION)
-        .map_err(|error| format!("failed to update agent ledger schema version: {error}"))?;
+        .map_err(|error| {
+            ce(format!(
+                "failed to update agent ledger schema version: {error}"
+            ))
+        })?;
     transaction
         .commit()
-        .map_err(|error| format!("failed to commit agent ledger migration: {error}"))?;
+        .map_err(|error| ce(format!("failed to commit agent ledger migration: {error}")))?;
     Ok(changed + removed)
 }
 
-fn agent_ledger_schema_version(connection: &Connection) -> Result<i64, String> {
+fn agent_ledger_schema_version(connection: &Connection) -> Result<i64, CommandError> {
     connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(|error| format!("failed to read agent ledger schema version: {error}"))
+        .map_err(|error| {
+            ce(format!(
+                "failed to read agent ledger schema version: {error}"
+            ))
+        })
 }
 
-fn ensure_supported_agent_ledger_schema(version: i64) -> Result<(), String> {
+fn ensure_supported_agent_ledger_schema(version: i64) -> Result<(), CommandError> {
     if version > AGENT_LEDGER_SCHEMA_VERSION {
-        return Err(format!(
+        return Err(ce(format!(
             "agent ledger schema version {version} is newer than supported version {AGENT_LEDGER_SCHEMA_VERSION}"
-        ));
+        )));
     }
     Ok(())
 }
@@ -627,8 +673,8 @@ fn sanitized_request(_: &Value) -> Value {
     json!({"schema_version": AGENT_LEDGER_SCHEMA_VERSION})
 }
 
-fn required_string(value: &Value, key: &str) -> Result<String, String> {
-    optional_string(value, key).ok_or_else(|| format!("{key} is required"))
+fn required_string(value: &Value, key: &str) -> Result<String, CommandError> {
+    optional_string(value, key).ok_or_else(|| ce(format!("{key} is required")))
 }
 
 fn optional_string(value: &Value, key: &str) -> Option<String> {
@@ -705,19 +751,20 @@ fn percentile_duration(values: &[i64], percentile: f64) -> Option<i64> {
     values.get(index).copied()
 }
 
-fn ensure_run_updated(changed: usize, run_id: &str) -> Result<(), String> {
+fn ensure_run_updated(changed: usize, run_id: &str) -> Result<(), CommandError> {
     if changed == 0 {
-        Err(format!("agent run not found: {run_id}"))
+        Err(ce(format!("agent run not found: {run_id}")))
     } else {
         Ok(())
     }
 }
 
-fn decode_json(text: &str, field: &str) -> Result<Value, String> {
-    serde_json::from_str(text).map_err(|error| format!("failed to decode agent {field}: {error}"))
+fn decode_json(text: &str, field: &str) -> Result<Value, CommandError> {
+    serde_json::from_str(text)
+        .map_err(|error| ce(format!("failed to decode agent {field}: {error}")))
 }
 
-fn decode_stored_run(stored: StoredAgentRun) -> Result<Value, String> {
+fn decode_stored_run(stored: StoredAgentRun) -> Result<Value, CommandError> {
     let events = decode_json(&stored.events_json, "events")?;
     let result = stored
         .result_json

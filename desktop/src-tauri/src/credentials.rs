@@ -1,4 +1,5 @@
 //! OS-backed secrets. Never expose a read-secret IPC command.
+use crate::error::{codes, CommandError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -6,6 +7,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 const PREFIX: &str = "gp-assistant.llm.";
 const MARKET_DATA_PREFIX: &str = "gp-assistant.market-data.";
 const STORE_ERROR: &str = "Credential store unavailable; key retained for this session only.";
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::CREDENTIALS_INTERNAL, message.to_string())
+}
+
 trait Backend: Send + Sync {
     fn write(&self, reference: &str, secret: &str) -> Result<(), ()>;
     fn read(&self, reference: &str) -> Result<Option<String>, ()>;
@@ -20,7 +26,11 @@ struct Vault {
     backend: Arc<dyn Backend>,
     lock: Mutex<()>,
 }
-fn validate_reference(reference: &str, prefix: &str, max_suffix_len: usize) -> Result<(), String> {
+fn validate_reference(
+    reference: &str,
+    prefix: &str,
+    max_suffix_len: usize,
+) -> Result<(), CommandError> {
     let suffix = reference.strip_prefix(prefix).unwrap_or_default();
     if suffix.is_empty()
         || suffix.len() > max_suffix_len
@@ -28,17 +38,20 @@ fn validate_reference(reference: &str, prefix: &str, max_suffix_len: usize) -> R
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        return Err("Invalid credential reference.".into());
+        return Err(CommandError::new(
+            codes::CREDENTIALS_INPUT,
+            "Invalid credential reference.",
+        ));
     }
     Ok(())
 }
-fn validate_llm_ref(reference: &str) -> Result<(), String> {
+fn validate_llm_ref(reference: &str) -> Result<(), CommandError> {
     validate_reference(reference, PREFIX, 96)
 }
-fn validate_market_data_ref(reference: &str) -> Result<(), String> {
+fn validate_market_data_ref(reference: &str) -> Result<(), CommandError> {
     validate_reference(reference, MARKET_DATA_PREFIX, 48)
 }
-fn market_data_credential_ref(provider_id: &str) -> Result<String, String> {
+fn market_data_credential_ref(provider_id: &str) -> Result<String, CommandError> {
     if provider_id.is_empty()
         || provider_id.len() > 48
         || !provider_id
@@ -46,30 +59,37 @@ fn market_data_credential_ref(provider_id: &str) -> Result<String, String> {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
         || !provider_id.as_bytes()[0].is_ascii_lowercase()
     {
-        return Err("Invalid market-data provider identifier.".into());
+        return Err(CommandError::new(
+            codes::CREDENTIALS_INPUT,
+            "Invalid market-data provider identifier.",
+        ));
     }
     Ok(format!("{MARKET_DATA_PREFIX}{provider_id}"))
 }
-fn validate_secret(secret: &str) -> Result<(), String> {
+fn validate_secret(secret: &str) -> Result<(), CommandError> {
     // Windows CRED_MAX_CREDENTIAL_BLOB_SIZE is 2560 bytes. Apply equally on Android.
     if secret.trim().is_empty() || secret.len() > 2560 || secret.contains(['\r', '\n', '\0']) {
-        return Err("Invalid API key (maximum 2560 UTF-8 bytes).".into());
+        return Err(ce("Invalid API key (maximum 2560 UTF-8 bytes)."));
     }
     Ok(())
 }
 impl Vault {
-    fn put(&self, reference: &str, secret: &str) -> Result<CredentialStatus, String> {
+    fn put(&self, reference: &str, secret: &str) -> Result<CredentialStatus, CommandError> {
         self.put_scoped(reference, secret, validate_llm_ref)
     }
-    fn put_market_data(&self, reference: &str, secret: &str) -> Result<CredentialStatus, String> {
+    fn put_market_data(
+        &self,
+        reference: &str,
+        secret: &str,
+    ) -> Result<CredentialStatus, CommandError> {
         self.put_scoped(reference, secret, validate_market_data_ref)
     }
     fn put_scoped(
         &self,
         reference: &str,
         secret: &str,
-        validate: fn(&str) -> Result<(), String>,
-    ) -> Result<CredentialStatus, String> {
+        validate: fn(&str) -> Result<(), CommandError>,
+    ) -> Result<CredentialStatus, CommandError> {
         validate(reference)?;
         validate_secret(secret)?;
         let _guard = self.lock.lock().map_err(|_| STORE_ERROR)?;
@@ -86,17 +106,17 @@ impl Vault {
             has_key: true,
         })
     }
-    fn status(&self, reference: &str) -> Result<CredentialStatus, String> {
+    fn status(&self, reference: &str) -> Result<CredentialStatus, CommandError> {
         self.status_scoped(reference, validate_llm_ref)
     }
-    fn market_data_status(&self, reference: &str) -> Result<CredentialStatus, String> {
+    fn market_data_status(&self, reference: &str) -> Result<CredentialStatus, CommandError> {
         self.status_scoped(reference, validate_market_data_ref)
     }
     fn status_scoped(
         &self,
         reference: &str,
-        validate: fn(&str) -> Result<(), String>,
-    ) -> Result<CredentialStatus, String> {
+        validate: fn(&str) -> Result<(), CommandError>,
+    ) -> Result<CredentialStatus, CommandError> {
         validate(reference)?;
         let _guard = self.lock.lock().map_err(|_| STORE_ERROR)?;
         let secret = self.backend.read(reference).map_err(|_| STORE_ERROR)?;
@@ -108,17 +128,17 @@ impl Vault {
             has_key: secret.is_some(),
         })
     }
-    fn delete(&self, reference: &str) -> Result<CredentialStatus, String> {
+    fn delete(&self, reference: &str) -> Result<CredentialStatus, CommandError> {
         self.delete_scoped(reference, validate_llm_ref)
     }
-    fn delete_market_data(&self, reference: &str) -> Result<CredentialStatus, String> {
+    fn delete_market_data(&self, reference: &str) -> Result<CredentialStatus, CommandError> {
         self.delete_scoped(reference, validate_market_data_ref)
     }
     fn delete_scoped(
         &self,
         reference: &str,
-        validate: fn(&str) -> Result<(), String>,
-    ) -> Result<CredentialStatus, String> {
+        validate: fn(&str) -> Result<(), CommandError>,
+    ) -> Result<CredentialStatus, CommandError> {
         validate(reference)?;
         let _guard = self.lock.lock().map_err(|_| STORE_ERROR)?;
         self.backend
@@ -130,14 +150,14 @@ impl Vault {
             .map_err(|_| STORE_ERROR)?
             .is_some()
         {
-            return Err("Credential deletion verification failed.".into());
+            return Err(ce("Credential deletion verification failed."));
         }
         Ok(CredentialStatus {
             credential_ref: reference.into(),
             has_key: false,
         })
     }
-    fn resolve(&self, reference: &str) -> Result<String, String> {
+    fn resolve(&self, reference: &str) -> Result<String, CommandError> {
         validate_llm_ref(reference)?;
         let _guard = self.lock.lock().map_err(|_| STORE_ERROR)?;
         let secret = self
@@ -163,12 +183,12 @@ fn market_data_status(provider_id: &str, has_key: bool) -> MarketDataCredentialS
     }
 }
 static VAULT: OnceLock<Vault> = OnceLock::new();
-fn vault() -> Result<&'static Vault, String> {
+fn vault() -> Result<&'static Vault, CommandError> {
     VAULT.get().ok_or_else(|| STORE_ERROR.into())
 }
 
 /// Resolve only in native request construction. Never mutate/return the request payload.
-pub(crate) fn resolve_api_key(payload: &Value) -> Result<String, String> {
+pub(crate) fn resolve_api_key(payload: &Value) -> Result<String, CommandError> {
     if let Some(reference) = payload.get("credential_ref") {
         let reference = reference.as_str().ok_or("Invalid credential reference.")?;
         validate_llm_ref(reference)?;
@@ -181,7 +201,7 @@ pub(crate) fn resolve_api_key(payload: &Value) -> Result<String, String> {
         .trim();
     // Session keys retain the existing provider limit; persistence has the OS limit above.
     if key.len() > 8192 || key.contains(['\r', '\n', '\0']) {
-        return Err("Invalid API key.".into());
+        return Err(ce("Invalid API key."));
     }
     Ok(key.into())
 }
@@ -190,7 +210,7 @@ pub(crate) fn resolve_api_key(payload: &Value) -> Result<String, String> {
 pub(crate) async fn api_credential_put(
     credential_ref: String,
     secret: String,
-) -> Result<CredentialStatus, String> {
+) -> Result<CredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || vault()?.put(&credential_ref, &secret))
         .await
         .map_err(|_| STORE_ERROR.to_string())?
@@ -198,7 +218,7 @@ pub(crate) async fn api_credential_put(
 #[tauri::command]
 pub(crate) async fn api_credential_status(
     credential_ref: String,
-) -> Result<CredentialStatus, String> {
+) -> Result<CredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || vault()?.status(&credential_ref))
         .await
         .map_err(|_| STORE_ERROR.to_string())?
@@ -206,7 +226,7 @@ pub(crate) async fn api_credential_status(
 #[tauri::command]
 pub(crate) async fn api_credential_delete(
     credential_ref: String,
-) -> Result<CredentialStatus, String> {
+) -> Result<CredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || vault()?.delete(&credential_ref))
         .await
         .map_err(|_| STORE_ERROR.to_string())?
@@ -216,7 +236,7 @@ pub(crate) async fn api_credential_delete(
 pub(crate) async fn api_market_data_credential_put(
     provider_id: String,
     secret: String,
-) -> Result<MarketDataCredentialStatus, String> {
+) -> Result<MarketDataCredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let reference = market_data_credential_ref(&provider_id)?;
         let status = vault()?.put_market_data(&reference, &secret)?;
@@ -229,7 +249,7 @@ pub(crate) async fn api_market_data_credential_put(
 #[tauri::command]
 pub(crate) async fn api_market_data_credential_status(
     provider_id: String,
-) -> Result<MarketDataCredentialStatus, String> {
+) -> Result<MarketDataCredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let reference = market_data_credential_ref(&provider_id)?;
         let status = vault()?.market_data_status(&reference)?;
@@ -242,7 +262,7 @@ pub(crate) async fn api_market_data_credential_status(
 #[tauri::command]
 pub(crate) async fn api_market_data_credential_delete(
     provider_id: String,
-) -> Result<MarketDataCredentialStatus, String> {
+) -> Result<MarketDataCredentialStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let reference = market_data_credential_ref(&provider_id)?;
         let status = vault()?.delete_market_data(&reference)?;

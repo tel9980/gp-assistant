@@ -53,6 +53,14 @@ if (hasErrorCode(error, "WATCHLIST_CONFLICT")) { /* 重新对齐 */ }
 | `desktop/src-tauri/src/jobs.rs` | `jobs.input` / `jobs.io` / `jobs.internal` | 作业队列 27 处签名；`Manager::execute` 的 `Fut: Future<Output = Result<Value, CommandError>>`、`end()` 收 `Result<Value, CommandError>`，`job_cancelled` / `job_timed_out` / `job_native_panicked` 走 `jobs.internal`，`job_schema_unsupported` 走 `jobs.input` |
 | `desktop/src-tauri/src/screening.rs` | `screening.input` / `screening.io` / `screening.internal` | 选股/回测域 40 处签名；`adaptive_screen_with_timeout<T, E>` 泛型化为 `E: Into<CommandError>`；「没有本地行情数据」落 `screening.io` |
 | `desktop/src-tauri/src/observe.rs` | `observe.input` / `observe.internal` | 观察页域 24 处签名；请求缺少股票代码落 `observe.input` |
+| `desktop/src-tauri/src/credentials.rs` | `credentials.input` | 凭据引用/市场数据 provider 标识校验；密钥仍只在内存与 OS 密钥链之间流转 |
+| `desktop/src-tauri/src/durability.rs` | `durability.io` / `durability.sqlite` | 崩溃安全落盘：目录创建走 `durability.io`，SQLite 快照校验走 `durability.sqlite` |
+| `desktop/src-tauri/src/agent_ledger.rs` | `agent_ledger.io` / `agent_ledger.sqlite` | Agent 运行账本；打开数据库失败落 `agent_ledger.sqlite`，建目录失败落 `agent_ledger.io` |
+| `desktop/src-tauri/src/external_data/store.rs` | `external_store.io` / `external_store.sqlite` / `external_store.internal` | 外部数据仓 31 处签名；`import_legacy_json` 的闭包仍回 `String`，调用点 `.map_err(CommandError::from)` |
+| `desktop/src-tauri/src/gepa_lab.rs` | `gepa_lab.io` / `gepa_lab.internal` | GEPA 实验域 14 处签名 |
+| `desktop/src-tauri/src/prompt_upgrade.rs` | `prompt_upgrade.io` / `prompt_upgrade.internal` | 提示词升级域 15 处签名 |
+| `desktop/src-tauri/src/research_recovery.rs` | `research_recovery.io` / `research_recovery.sqlite` / `research_recovery.internal` | 研究库恢复 19 处签名；快照文件读写走 io，校验走 sqlite |
+| `desktop/src-tauri/src/news_rag.rs` | `news_rag.io` / `news_rag.input` / `news_rag.internal` | 新闻 RAG 23 处签名 |
 | `desktop/src-tauri/src/market.rs`（含 `observe.rs`、`screening.rs`、`jobs.rs`、`hk_market.rs`、`rig_runtime.rs`、`external_data/mod.rs` 接缝） | `market.network` / `market.provider` / `market.io` / `market.input` / `market.internal` | 行情域 72 处签名；`ce()` 按消息关键词分类到 network/provider/io/input，其余落 internal。**这是被最多模块共享的域**：`with_market_refresh_permit` / `with_heavy_network_permit` 改成泛型 `E: From<String>`，`screening.rs` 在闭包内 `.map_err(String::from)` 回到 String |
 | `desktop/src-tauri/src/research.rs`（含 `research_recovery.rs`、`jobs.rs`、`sentiment.rs` 的接缝） | `research.io` / `research.sqlite` / `research.input` / `research.not_found` / `research.index_stale` / `research.pack_invalid` / `research.internal` | 研究库 90 处签名；`research.not_found` 已接到 `NewsRagPanel`：会话不存在时从列表摘掉并提示，而不是让用户反复点「重试加载会话」 |
 

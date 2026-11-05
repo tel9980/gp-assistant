@@ -5,6 +5,7 @@ use std::{
     sync::Mutex,
 };
 
+use crate::error::{codes, CommandError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -20,6 +21,11 @@ const HOT_MONEY_PROMPT: &str = include_str!("../../../app/prompts/hot_money_earl
 const VALUE_COMPOUNDER_PROMPT: &str = include_str!("../../../app/prompts/value_compounder_v1.md");
 const STOCK_SOUL_PROMPT: &str = include_str!("../../../app/prompts/stock_soul.md");
 const EVAL_CASES: &str = include_str!("../../../app/prompts/agent_harness_eval_cases.json");
+
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::PROMPT_UPGRADE_INTERNAL, message.to_string())
+}
 
 static OVERLAY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -81,7 +87,7 @@ fn method_card_digest(body: &str) -> String {
         .collect()
 }
 
-pub(crate) fn builtin_method_card_version(profile_id: &str) -> Result<String, String> {
+pub(crate) fn builtin_method_card_version(profile_id: &str) -> Result<String, CommandError> {
     let contract = profile_contract(profile_id)?;
     let body = builtin_body(contract.mode);
     Ok(format!(
@@ -114,7 +120,7 @@ pub(crate) fn resolve_prompt(mode: &str, app: Option<&AppHandle>) -> ResolvedPro
 pub(crate) fn resolve_method_card(
     profile_id: &str,
     app: Option<&AppHandle>,
-) -> Result<ResolvedMethodCard, String> {
+) -> Result<ResolvedMethodCard, CommandError> {
     let contract = profile_contract(profile_id)?;
     let active = match app {
         Some(app) => read_active_prompt(app, profile_id)?,
@@ -138,54 +144,56 @@ pub(crate) fn activate_gepa_with_app(
     profile_id: &str,
     expected_base_version: &str,
     body: &str,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     let _guard = OVERLAY_LOCK
         .lock()
         .map_err(|_| "prompt overlay lock is poisoned".to_string())?;
     activate_gepa_at(&overlay_path(app)?, profile_id, expected_base_version, body)
 }
 
-pub(crate) fn status_with_app(app: &AppHandle) -> Result<Vec<PromptOverlayStatus>, String> {
+pub(crate) fn status_with_app(app: &AppHandle) -> Result<Vec<PromptOverlayStatus>, CommandError> {
     let _guard = OVERLAY_LOCK
         .lock()
         .map_err(|_| "prompt overlay lock is poisoned".to_string())?;
     status_at(&overlay_path(app)?)
 }
 
-pub(crate) fn revert_with_app(app: &AppHandle, profile_id: &str) -> Result<(), String> {
+pub(crate) fn revert_with_app(app: &AppHandle, profile_id: &str) -> Result<(), CommandError> {
     let _guard = OVERLAY_LOCK
         .lock()
         .map_err(|_| "prompt overlay lock is poisoned".to_string())?;
     revert_at(&ledger_path(app)?, &overlay_path(app)?, profile_id)
 }
 
-pub(crate) fn evaluate_candidate(profile_id: &str, body: &str) -> Result<(), String> {
+pub(crate) fn evaluate_candidate(profile_id: &str, body: &str) -> Result<(), CommandError> {
     let contract = profile_contract(profile_id)?;
     let body = body.trim();
     if body.is_empty() {
-        return Err("method card is empty".to_string());
+        return Err(ce("method card is empty"));
     }
     if body.chars().count() > MAX_METHOD_CARD_CHARS {
-        return Err(format!(
+        return Err(ce(format!(
             "method card exceeds {MAX_METHOD_CARD_CHARS} characters"
-        ));
+        )));
     }
     let prompt = compose(contract.mode, body, BASE_PROMPT_VERSION).text;
     if !prompt.contains("不构成投资建议") {
-        return Err("method card removed the research-only disclaimer".to_string());
+        return Err(ce("method card removed the research-only disclaimer"));
     }
     for term in &contract.required_terms {
         if !prompt.contains(term) {
-            return Err(format!("method card is missing required term: {term}"));
+            return Err(ce(format!("method card is missing required term: {term}")));
         }
     }
     for term in &contract.forbidden_terms {
         if prompt.contains(term) {
-            return Err(format!("method card contains a forbidden term: {term}"));
+            return Err(ce(format!("method card contains a forbidden term: {term}")));
         }
     }
     if agent_harness::contains_prohibited_instruction_text(&prompt) {
-        return Err("method card contains a trading, position, or return promise".to_string());
+        return Err(ce(
+            "method card contains a trading, position, or return promise",
+        ));
     }
     Ok(())
 }
@@ -195,7 +203,7 @@ fn activate_gepa_at(
     profile_id: &str,
     expected_base_version: &str,
     body: &str,
-) -> Result<String, String> {
+) -> Result<String, CommandError> {
     profile_contract(profile_id)?;
     evaluate_candidate(profile_id, body)?;
     let mut store = load_store(overlay_path)?;
@@ -207,7 +215,9 @@ fn activate_gepa_at(
         .map(|active| active.version.clone())
         .unwrap_or(builtin_method_card_version(profile_id)?);
     if current_version != expected_base_version {
-        return Err("active prompt version changed; rerun GEPA before applying".to_string());
+        return Err(ce(
+            "active prompt version changed; rerun GEPA before applying",
+        ));
     }
     let n = profile.next_n.max(1);
     let version = format!("{BASE_PROMPT_VERSION}+{profile_id}+{n}");
@@ -223,7 +233,7 @@ fn activate_gepa_at(
     Ok(version)
 }
 
-fn status_at(overlay_path: &Path) -> Result<Vec<PromptOverlayStatus>, String> {
+fn status_at(overlay_path: &Path) -> Result<Vec<PromptOverlayStatus>, CommandError> {
     let store = load_store(overlay_path)?;
     Ok(["hot_money_early_v1", "value_compounder_v1"]
         .into_iter()
@@ -246,7 +256,11 @@ fn status_at(overlay_path: &Path) -> Result<Vec<PromptOverlayStatus>, String> {
         .collect())
 }
 
-fn revert_at(ledger_path: &Path, overlay_path: &Path, profile_id: &str) -> Result<(), String> {
+fn revert_at(
+    ledger_path: &Path,
+    overlay_path: &Path,
+    profile_id: &str,
+) -> Result<(), CommandError> {
     profile_contract(profile_id)?;
     let mut store = load_store(overlay_path)?;
     let consumed = agent_ledger::AgentRunStore::open(ledger_path)?
@@ -261,7 +275,10 @@ fn revert_at(ledger_path: &Path, overlay_path: &Path, profile_id: &str) -> Resul
     save_store(overlay_path, &store)
 }
 
-fn read_active_prompt(app: &AppHandle, profile_id: &str) -> Result<Option<ActivePrompt>, String> {
+fn read_active_prompt(
+    app: &AppHandle,
+    profile_id: &str,
+) -> Result<Option<ActivePrompt>, CommandError> {
     let path = overlay_path(app)?;
     let _guard = OVERLAY_LOCK
         .lock()
@@ -311,20 +328,20 @@ fn profile_label(profile_id: &str) -> &'static str {
     }
 }
 
-fn profile_contract(profile_id: &str) -> Result<ProfileContract, String> {
+fn profile_contract(profile_id: &str) -> Result<ProfileContract, CommandError> {
     let mode = match profile_id {
         "hot_money_early_v1" => "expert",
         "value_compounder_v1" => "research",
         _ => {
-            return Err("only expert and research method cards can be upgraded".to_string());
+            return Err(ce("only expert and research method cards can be upgraded"));
         }
     };
     let suite: Value = serde_json::from_str(EVAL_CASES)
-        .map_err(|error| format!("invalid prompt contract: {error}"))?;
+        .map_err(|error| ce(format!("invalid prompt contract: {error}")))?;
     let contract = suite
         .get("profiles")
         .and_then(|profiles| profiles.get(mode))
-        .ok_or_else(|| "prompt contract is missing the research profile".to_string())?;
+        .ok_or_else(|| ce("prompt contract is missing the research profile"))?;
     Ok(ProfileContract {
         mode,
         required_terms: string_list(contract.get("required_prompt_terms")),
@@ -345,27 +362,28 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn overlay_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut path = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve prompt overlay directory: {error}"))?;
+fn overlay_path(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let mut path = app.path().app_data_dir().map_err(|error| {
+        ce(format!(
+            "failed to resolve prompt overlay directory: {error}"
+        ))
+    })?;
     path.push("agent");
     path.push("prompt-overlays.json");
     Ok(path)
 }
 
-fn ledger_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn ledger_path(app: &AppHandle) -> Result<PathBuf, CommandError> {
     let mut path = app
         .path()
         .app_data_dir()
-        .map_err(|error| format!("failed to resolve agent ledger directory: {error}"))?;
+        .map_err(|error| ce(format!("failed to resolve agent ledger directory: {error}")))?;
     path.push("agent");
     path.push("agent-runs.sqlite");
     Ok(path)
 }
 
-fn load_store(path: &Path) -> Result<OverlayStore, String> {
+fn load_store(path: &Path) -> Result<OverlayStore, CommandError> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|_| "Prompt overlay is damaged; original preserved. Restore a verified copy before changing profiles.".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(OverlayStore::default()),
@@ -373,13 +391,16 @@ fn load_store(path: &Path) -> Result<OverlayStore, String> {
     }
 }
 
-fn save_store(path: &Path, store: &OverlayStore) -> Result<(), String> {
+fn save_store(path: &Path, store: &OverlayStore) -> Result<(), CommandError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create prompt overlay directory: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            ce(format!(
+                "failed to create prompt overlay directory: {error}"
+            ))
+        })?;
     }
     let text = serde_json::to_string_pretty(store)
-        .map_err(|error| format!("failed to encode prompt overlay: {error}"))?;
+        .map_err(|error| ce(format!("failed to encode prompt overlay: {error}")))?;
     crate::durability::atomic_write_json(path, text.as_bytes())
 }
 #[cfg(test)]

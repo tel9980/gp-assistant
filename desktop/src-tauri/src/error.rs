@@ -45,6 +45,19 @@ pub mod codes {
     pub const EVOLUTION_SCHEMA: &str = "evolution.schema";
     pub const EVOLUTION_INPUT: &str = "evolution.input";
     pub const EVOLUTION_INTERNAL: &str = "evolution.internal";
+    pub const CREDENTIALS_INPUT: &str = "credentials.input";
+    pub const CREDENTIALS_INTERNAL: &str = "credentials.internal";
+    pub const DURABILITY_IO: &str = "durability.io";
+    pub const DURABILITY_SQLITE: &str = "durability.sqlite";
+    pub const DURABILITY_INTERNAL: &str = "durability.internal";
+    pub const AGENT_LEDGER_IO: &str = "agent_ledger.io";
+    pub const AGENT_LEDGER_SQLITE: &str = "agent_ledger.sqlite";
+    pub const AGENT_LEDGER_INTERNAL: &str = "agent_ledger.internal";
+    pub const EXTERNAL_STORE_INTERNAL: &str = "external_store.internal";
+    pub const GEPA_LAB_INTERNAL: &str = "gepa_lab.internal";
+    pub const PROMPT_UPGRADE_INTERNAL: &str = "prompt_upgrade.internal";
+    pub const RESEARCH_RECOVERY_INTERNAL: &str = "research_recovery.internal";
+    pub const NEWS_RAG_INTERNAL: &str = "news_rag.internal";
 
     /// 后台任务调度（jobs）。
     pub const JOBS_IO: &str = "jobs.io";

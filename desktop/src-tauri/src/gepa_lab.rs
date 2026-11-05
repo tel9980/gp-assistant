@@ -1,6 +1,12 @@
+use crate::error::{codes, CommandError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+/// 本模块的错误统一从这里出。
+fn ce(message: impl std::fmt::Display) -> CommandError {
+    CommandError::new(codes::GEPA_LAB_INTERNAL, message.to_string())
+}
+
 #[cfg(all(
     feature = "gepa-lab",
     target_os = "windows",
@@ -106,45 +112,45 @@ fn default_replay_profile() -> String {
 }
 
 static REPORT_ROOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-fn reports_root(app: &AppHandle) -> Result<PathBuf, String> {
+fn reports_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
     let mut root = app
         .path()
         .app_data_dir()
-        .map_err(|e| format!("failed to resolve GEPA report directory: {e}"))?;
+        .map_err(|e| ce(format!("failed to resolve GEPA report directory: {e}")))?;
     root.push("agent");
     root.push("gepa-runs");
     fs::create_dir_all(&root)
-        .map_err(|e| format!("failed to create GEPA report directory: {e}"))?;
+        .map_err(|e| ce(format!("failed to create GEPA report directory: {e}")))?;
     if let Ok(mut cached) = REPORT_ROOT.get_or_init(|| Mutex::new(None)).lock() {
         *cached = Some(root.clone());
     }
     Ok(root)
 }
-fn report_path(app: &AppHandle, run_id: &str) -> Result<PathBuf, String> {
+fn report_path(app: &AppHandle, run_id: &str) -> Result<PathBuf, CommandError> {
     let mut p = reports_root(app)?;
     validate_run_id(run_id)?;
     p.push(format!("{run_id}.json"));
     Ok(p)
 }
-fn save_report(app: &AppHandle, report: &GepaRunReport) -> Result<(), String> {
+fn save_report(app: &AppHandle, report: &GepaRunReport) -> Result<(), CommandError> {
     let path = report_path(app, &report.run_id)?;
     let text = serde_json::to_string_pretty(report)
-        .map_err(|e| format!("encode GEPA report failed: {e}"))?;
+        .map_err(|e| ce(format!("encode GEPA report failed: {e}")))?;
     crate::durability::atomic_write_json(&path, text.as_bytes())
 }
-fn load_report(app: &AppHandle, run_id: &str) -> Result<GepaRunReport, String> {
+fn load_report(app: &AppHandle, run_id: &str) -> Result<GepaRunReport, CommandError> {
     let text = fs::read_to_string(report_path(app, run_id)?)
-        .map_err(|e| format!("GEPA report not found: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("GEPA report is invalid: {e}"))
+        .map_err(|e| ce(format!("GEPA report not found: {e}")))?;
+    serde_json::from_str(&text).map_err(|e| ce(format!("GEPA report is invalid: {e}")))
 }
-fn validate_run_id(run_id: &str) -> Result<(), String> {
+fn validate_run_id(run_id: &str) -> Result<(), CommandError> {
     if run_id.is_empty()
         || run_id.len() > 128
         || !run_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
     {
-        return Err("invalid GEPA run_id".to_string());
+        return Err(ce("invalid GEPA run_id"));
     }
     Ok(())
 }
@@ -158,14 +164,14 @@ fn emit(app: &AppHandle, run_id: &str, event_type: &str, payload: Value) {
     }
     let _ = app.emit(EVENT_NAME, event);
 }
-fn parse_suite() -> Result<EvalSuiteFile, String> {
+fn parse_suite() -> Result<EvalSuiteFile, CommandError> {
     let mut suite: EvalSuiteFile = serde_json::from_str(EVAL_SUITE)
-        .map_err(|e| format!("GEPA evaluation fixture is invalid JSON: {e}"))?;
+        .map_err(|e| ce(format!("GEPA evaluation fixture is invalid JSON: {e}")))?;
     if suite.version != "agent-gepa-eval-v1" {
-        return Err(format!(
+        return Err(ce(format!(
             "unsupported GEPA evaluation fixture version: {}",
             suite.version
-        ));
+        )));
     }
     for (profile_id, mode) in [
         ("hot_money_early_v1", "expert"),
@@ -180,9 +186,9 @@ fn parse_suite() -> Result<EvalSuiteFile, String> {
             || profile.validation.len() != 4
             || profile.holdout.len() != 4
         {
-            return Err(format!(
+            return Err(ce(format!(
                 "GEPA profile {profile_id} does not satisfy the fixed fixture contract"
-            ));
+            )));
         }
         profile.profile_id = profile_id.to_string();
     }
@@ -290,28 +296,28 @@ fn replay_tool_trajectory(events: &[Value]) -> Vec<Value> {
         .collect()
 }
 
-fn validate_gepa_trajectory(trajectory: &[Value]) -> Result<(), String> {
+fn validate_gepa_trajectory(trajectory: &[Value]) -> Result<(), CommandError> {
     let mut seen = std::collections::BTreeSet::new();
     for step in trajectory {
         let tool = step["tool_name"].as_str().unwrap_or("unknown");
         if step["side_effect_class"] != "read_only" {
-            return Err(format!(
+            return Err(ce(format!(
                 "GEPA trajectory contains non-read-only tool {tool}"
-            ));
+            )));
         }
         if !matches!(step["status"].as_str(), Some("ok" | "degraded")) {
-            return Err(format!(
+            return Err(ce(format!(
                 "GEPA trajectory tool {tool} did not complete successfully"
-            ));
+            )));
         }
         let key = format!(
             "{tool}:{}",
             step["arguments_hash"].as_str().unwrap_or_default()
         );
         if !seen.insert(key) {
-            return Err(format!(
+            return Err(ce(format!(
                 "GEPA trajectory repeats the same read-only tool call: {tool}"
-            ));
+            )));
         }
     }
     Ok(())
@@ -381,16 +387,16 @@ fn numeric_token_variants(token: &str) -> Vec<String> {
 fn validate_frozen_fact_literals(
     profile: &EvalProfile,
     model_response: &Value,
-) -> Result<(), String> {
+) -> Result<(), CommandError> {
     let corpus = serde_json::to_string(&profile.tool_result).unwrap_or_default();
     for token in numeric_fact_tokens(&response_text(model_response)) {
         if !numeric_token_variants(&token)
             .iter()
             .any(|variant| corpus.contains(variant))
         {
-            return Err(format!(
+            return Err(ce(format!(
                 "model output contains unsupported frozen fact literal {token}"
-            ));
+            )));
         }
     }
     Ok(())
@@ -401,7 +407,7 @@ fn score_case(profile: &EvalProfile, case: &EvalCase, model_response: &Value) ->
         return CaseEvaluation {
             score: 0.0,
             feedback: vec![format!("hard gate failed: {error}")],
-            hard_failure: Some(error),
+            hard_failure: Some(error.to_string()),
             merged_response: Value::Null,
         };
     }
@@ -561,7 +567,7 @@ mod engine {
                 let replay = tokio::select! {
                     _ = self.cancellation.cancelled() => {
                         rig_runtime::request_cancel(&replay_run_id);
-                        Err("GEPA run cancelled".to_string())
+                        Err(ce("GEPA run cancelled"))
                     }
                     result = rig_runtime::execute_with_event_sink(payload, data, |event| events.push(event)) => {
                         result.map(|outcome| outcome.response)
@@ -589,7 +595,7 @@ mod engine {
                     |error| CaseEvaluation {
                         score: 0.0,
                         feedback: vec![format!("shared replay hard gate failed: {error}")],
-                        hard_failure: Some(error),
+                        hard_failure: Some(error.to_string()),
                         merged_response: response.clone(),
                     },
                 );
@@ -687,7 +693,7 @@ mod engine {
             let run_id = self.run_id.clone();
             async move {
                 if cancellation.is_cancelled() {
-                    return Err("GEPA run cancelled".to_string());
+                    return Err(ce("GEPA run cancelled"));
                 }
                 let config = rig_runtime::normalize_provider_config(&llm)?;
                 let model = rig_runtime::build_model_with_payload(&config, &llm).map_err(|e| {
@@ -701,7 +707,7 @@ mod engine {
                     json!({"message":"正在根据固定评测反馈反思方法卡"}),
                 );
                 let raw = tokio::select! {
-                    _ = cancellation.cancelled() => return Err("GEPA run cancelled".to_string()),
+                    _ = cancellation.cancelled() => return Err(ce("GEPA run cancelled")),
                     result = tokio::time::timeout(
                         Duration::from_secs(config.timeout_seconds.min(120).max(1)),
                         agent.prompt(prompt).run(),
@@ -714,7 +720,7 @@ mod engine {
                     Some(&llm),
                 );
                 if body.trim().is_empty() {
-                    return Err("GEPA reflection returned an empty method card".to_string());
+                    return Err(ce("GEPA reflection returned an empty method card"));
                 }
                 let mut next = candidate.clone();
                 next.insert("method_card", body);
@@ -955,14 +961,14 @@ pub(crate) fn maybe_start_headless_from_env(app: AppHandle) {
         tauri::async_runtime::spawn(async move {
             let result = async {
                 let text = fs::read_to_string(&config_path)
-                    .map_err(|error| format!("read GEPA headless config failed: {error}"))?;
+                    .map_err(|error| ce(format!("read GEPA headless config failed: {error}")))?;
                 let payload: Value = serde_json::from_str(&text)
-                    .map_err(|error| format!("parse GEPA headless config failed: {error}"))?;
+                    .map_err(|error| ce(format!("parse GEPA headless config failed: {error}")))?;
                 let started = api_agent_gepa_start(app.clone(), payload)?;
                 let run_id = started
                     .get("run_id")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| "GEPA headless start did not return run_id".to_string())?
+                    .ok_or_else(|| ce("GEPA headless start did not return run_id"))?
                     .to_string();
                 loop {
                     sleep(Duration::from_secs(1)).await;
@@ -992,17 +998,20 @@ pub(crate) fn maybe_start_headless_from_env(app: AppHandle) {
     let _ = app;
 }
 
-fn write_headless_output(path: &PathBuf, value: &Value) -> Result<(), String> {
+fn write_headless_output(path: &PathBuf, value: &Value) -> Result<(), CommandError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create GEPA headless output directory failed: {error}"))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            ce(format!(
+                "create GEPA headless output directory failed: {error}"
+            ))
+        })?;
     }
     let text = serde_json::to_string_pretty(value)
-        .map_err(|error| format!("encode GEPA headless output failed: {error}"))?;
-    fs::write(path, text).map_err(|error| format!("write GEPA headless output failed: {error}"))
+        .map_err(|error| ce(format!("encode GEPA headless output failed: {error}")))?;
+    fs::write(path, text).map_err(|error| ce(format!("write GEPA headless output failed: {error}")))
 }
 #[tauri::command]
-pub(crate) fn api_agent_gepa_status() -> Result<Value, String> {
+pub(crate) fn api_agent_gepa_status() -> Result<Value, CommandError> {
     let compiled = cfg!(all(
         feature = "gepa-lab",
         any(target_os = "windows", target_os = "android")
@@ -1013,10 +1022,10 @@ pub(crate) fn api_agent_gepa_status() -> Result<Value, String> {
     )
 }
 #[tauri::command]
-pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Value, CommandError> {
     if !crate::diagnostics::gepa_allowed() {
         let _ = crate::diagnostics::record(crate::diagnostics::OperationalEvent::GepaBlocked);
-        return Err("GEPA 已关闭或处于安全启动模式；请在本地设置中检查开关".into());
+        return Err(ce("GEPA 已关闭或处于安全启动模式；请在本地设置中检查开关"));
     }
     #[cfg(not(all(
         feature = "gepa-lab",
@@ -1024,7 +1033,7 @@ pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Val
     )))]
     {
         let _ = (app, payload);
-        return Err("GEPA 仅在启用功能的 Windows 或 Android 构建中可用".to_string());
+        return Err(ce("GEPA 仅在启用功能的 Windows 或 Android 构建中可用"));
     }
     #[cfg(all(
         feature = "gepa-lab",
@@ -1040,17 +1049,17 @@ pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Val
             .and_then(Value::as_u64)
             .unwrap_or(60) as usize;
         if !matches!(calls, 30 | 60 | 120) {
-            return Err("max_metric_calls must be 30, 60, or 120".to_string());
+            return Err(ce("max_metric_calls must be 30, 60, or 120"));
         }
         let mut suite = parse_suite()?;
         let profile = suite
             .profiles
             .remove(profile_id)
-            .ok_or_else(|| "未知 GEPA profile".to_string())?;
+            .ok_or_else(|| ce("未知 GEPA profile"))?;
         let llm = payload
             .get("llm")
             .cloned()
-            .ok_or_else(|| "GEPA 需要当前 Agent 模型配置".to_string())?;
+            .ok_or_else(|| ce("GEPA 需要当前 Agent 模型配置"))?;
         rig_runtime::normalize_provider_config(&llm)?;
         let card = prompt_upgrade::resolve_method_card(profile_id, Some(&app))?;
         let run_id = crate::agent_ledger::next_run_id();
@@ -1089,7 +1098,7 @@ pub(crate) fn api_agent_gepa_start(app: AppHandle, payload: Value) -> Result<Val
     }
 }
 #[tauri::command]
-pub(crate) fn api_agent_gepa_cancel(payload: Value) -> Result<Value, String> {
+pub(crate) fn api_agent_gepa_cancel(payload: Value) -> Result<Value, CommandError> {
     let id = payload
         .get("run_id")
         .and_then(Value::as_str)
@@ -1099,24 +1108,24 @@ pub(crate) fn api_agent_gepa_cancel(payload: Value) -> Result<Value, String> {
     Ok(json!({"run_id":id,"cancelled":rig_runtime::request_cancel(id)}))
 }
 #[tauri::command]
-pub(crate) fn api_agent_gepa_report(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_agent_gepa_report(app: AppHandle, payload: Value) -> Result<Value, CommandError> {
     let id = payload
         .get("run_id")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
     validate_run_id(id)?;
-    serde_json::to_value(load_report(&app, id)?).map_err(|e| e.to_string())
+    serde_json::to_value(load_report(&app, id)?).map_err(|e| ce(e))
 }
 #[tauri::command]
-pub(crate) fn api_agent_gepa_apply(app: AppHandle, payload: Value) -> Result<Value, String> {
+pub(crate) fn api_agent_gepa_apply(app: AppHandle, payload: Value) -> Result<Value, CommandError> {
     if !cfg!(all(
         feature = "gepa-lab",
         any(target_os = "windows", target_os = "android")
     )) || !crate::diagnostics::gepa_allowed()
     {
         let _ = crate::diagnostics::record(crate::diagnostics::OperationalEvent::GepaBlocked);
-        return Err("GEPA 已关闭或处于安全启动模式；不能应用实验候选".into());
+        return Err(ce("GEPA 已关闭或处于安全启动模式；不能应用实验候选"));
     }
     let id = payload
         .get("run_id")
@@ -1130,19 +1139,19 @@ pub(crate) fn api_agent_gepa_apply(app: AppHandle, payload: Value) -> Result<Val
         .trim();
     validate_run_id(id)?;
     if expected.is_empty() {
-        return Err("expected_base_prompt_version is required".to_string());
+        return Err(ce("expected_base_prompt_version is required"));
     }
     let report = load_report(&app, id)?;
     if report.status != "completed" {
-        return Err("only a completed GEPA run can be applied".to_string());
+        return Err(ce("only a completed GEPA run can be applied"));
     }
     if report.apply_gate["passed"] != true {
-        return Err("GEPA candidate failed validation/holdout apply gate".to_string());
+        return Err(ce("GEPA candidate failed validation/holdout apply gate"));
     }
     let body = report
         .candidate_body
         .as_deref()
-        .ok_or_else(|| "GEPA report has no candidate".to_string())?;
+        .ok_or_else(|| ce("GEPA report has no candidate"))?;
     let version = prompt_upgrade::activate_gepa_with_app(&app, &report.profile_id, expected, body)?;
     Ok(json!({"run_id":id,"profile_id":report.profile_id,"prompt_version":version,"applied":true}))
 }
