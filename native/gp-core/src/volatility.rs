@@ -125,11 +125,13 @@ pub(crate) fn calculate_volatility_snapshot(
     let bars = trailing_valid_bars(&normalized);
     let latest_close = latest.close;
 
-    let atr = calculate_atr(&bars, ATR_PERIOD).map(|value| AtrSnapshot {
-        period: ATR_PERIOD,
-        value: round4(value),
-        percent_of_close: round4(value / latest_close.expect("ATR requires close") * 100.0),
-    });
+    let atr = calculate_atr(&bars, ATR_PERIOD)
+        .zip(latest_close.filter(|close| *close != 0.0))
+        .map(|(value, close)| AtrSnapshot {
+            period: ATR_PERIOD,
+            value: round4(value),
+            percent_of_close: round4(value / close * 100.0),
+        });
     let bollinger_bands = calculate_bollinger_bands(&bars, BOLLINGER_PERIOD, BOLLINGER_MULTIPLIER);
     let donchian_channel = calculate_donchian_channel(&bars, DONCHIAN_PERIOD);
     let keltner_channel = calculate_keltner_channel(
@@ -206,10 +208,12 @@ fn trailing_valid_bars(history: &[NormalizedBar]) -> Vec<CalculationBar> {
         .iter()
         .rev()
         .take_while(|bar| bar.close.is_some())
-        .map(|bar| CalculationBar {
-            high: bar.high,
-            low: bar.low,
-            close: bar.close.expect("validated close"),
+        .filter_map(|bar| {
+            bar.close.map(|close| CalculationBar {
+                high: bar.high,
+                low: bar.low,
+                close,
+            })
         })
         .collect::<Vec<_>>()
         .into_iter()

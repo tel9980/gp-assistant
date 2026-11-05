@@ -36,9 +36,9 @@ where
     };
 
     let output = envelope.to_string().replace('\0', "");
-    CString::new(output)
-        .expect("JSON output should not contain null bytes")
-        .into_raw()
+    // 上面已经剔掉 NUL，这里不会再失败；真失败时给调用方一个空串而不是 panic
+    // （FFI 边界 panic 会直接吃掉宿主进程）。
+    CString::new(output).map_or(std::ptr::null_mut(), |value| value.into_raw())
 }
 
 #[no_mangle]

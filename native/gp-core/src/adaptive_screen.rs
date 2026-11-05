@@ -398,11 +398,11 @@ fn detect_regime(
     let detected = if !sufficient_for_detection {
         "insufficient"
     } else {
-        let breadth = usable_breadth.expect("checked above").advancing_ratio;
-        let median_return = median_return.expect("two valid benchmarks");
-        let median_spread = median_spread.expect("two valid benchmarks");
-        let median_efficiency = median_efficiency.expect("two valid benchmarks");
-        let median_atr = median_atr.expect("two valid benchmarks");
+        let breadth = usable_breadth.map_or(0.5, |value| value.advancing_ratio);
+        let median_return = median_return.unwrap_or(0.0);
+        let median_spread = median_spread.unwrap_or(0.0);
+        let median_efficiency = median_efficiency.unwrap_or(0.0);
+        let median_atr = median_atr.unwrap_or(0.0);
         if median_atr > 0.75 || conflicting {
             "transition"
         } else if trend_votes >= 2 && breadth > 0.50 {
@@ -975,14 +975,20 @@ fn build_screened(
     strongest.sort_by(|left, right| {
         right
             .contribution
-            .unwrap()
-            .total_cmp(&left.contribution.unwrap())
+            .unwrap_or(0.0)
+            .total_cmp(&left.contribution.unwrap_or(0.0))
             .then_with(|| left.key.cmp(&right.key))
     });
     let highlights = strongest
         .into_iter()
         .take(2)
-        .map(|entry| format!("{}贡献 {:.2}分", entry.label, entry.contribution.unwrap()))
+        .map(|entry| {
+            format!(
+                "{}贡献 {:.2}分",
+                entry.label,
+                entry.contribution.unwrap_or(0.0)
+            )
+        })
         .collect::<Vec<_>>();
     let mut reasons = vec![format!("{}模式综合得分 {:.2}", regime_label(mode), score)];
     reasons.extend(highlights.clone());
